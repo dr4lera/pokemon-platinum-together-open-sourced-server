@@ -58,7 +58,15 @@ export class CommunityLink {
   }
   lobby(c,m){
     if(!m.t.startsWith('community.link.'))return false;
-    this.enabled();this.reconcile();
+    this.enabled();
+    if(m.t==='community.link.cancel'){
+      // Cancellation withdraws preparation even before party/session creation.
+      // It is idempotent and scoped to this exact authenticated lobby socket.
+      delete c.communityLinkPrepared;
+      for(const s of this.sessions.values())if(s.members.some(member=>member.lobby===c))this.end(s,'cancelled');
+      this.reconcile();this.hub.send(c,{t:'community.link.cancelled'});return true;
+    }
+    this.reconcile();
     c.communityLinkControl??=new TokenBucket(1,8);if(!c.communityLinkControl.allow(1))fail('link_control_rate_limit');
     if(m.t==='community.link.prepare'){
       const fingerprint=communityLinkFingerprint(m);if(c.build!==fingerprint.build)fail('link_build_mismatch');
@@ -86,10 +94,6 @@ export class CommunityLink {
       s.rosterHash=sha(Buffer.from(JSON.stringify(members.map(({seat,player,key,mac})=>({seat,player,key,mac}))))).toString('hex');
       this.sessions.set(s.id,s);this.requests.set(requestKey,{session:s.id,expires:s.expires+120000});
       for(const member of members)this.issue(s,member);return true;
-    }
-    if(m.t==='community.link.cancel'){
-      const s=[...this.sessions.values()].find(s=>s.party===party.id);if(!s)fail('link_session_closed');
-      if(!s.members.some(member=>member.lobby===c))fail('link_wrong_lobby');this.end(s,'cancelled');return true;
     }
     if(m.t==='community.link.ticket'){
       const s=this.sessions.get(m.session);if(!s||s.party!==party.id||m.epoch!==s.epoch)fail('link_session_closed');

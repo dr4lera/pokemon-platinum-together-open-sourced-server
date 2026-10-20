@@ -68,9 +68,15 @@ Before attaching, a bound participant can request a replacement unused ticket:
 `{t:"community.link.ticket",session,epoch}`. It invalidates the previous ticket
 and sends one replacement offer. This is allowed only while that participant
 is unattached and the session has not become active; it does not extend the join
-deadline. Any bound participant can send `{t:"community.link.cancel"}` on its
-lobby to end the session. Control commands have an elapsed-time budget of eight
-initial commands, refilling one command per second per lobby socket.
+deadline. `{t:"community.link.cancel"}` on an authenticated lobby withdraws that
+exact socket's preparation and ends any session bound to it. It replies
+`{t:"community.link.cancelled"}` even if no party/session exists; repeating it is
+idempotent. Another socket for the same account cannot cancel the frozen lobby.
+Wait for this acknowledgment before preparing again. Cancellation runs before
+party lookup and the allocation control budget, so exhausted allocation credit
+cannot retain unwanted consent; the general Hub message rate limit still applies.
+Other control commands have an elapsed-time budget of eight initial commands,
+refilling one command per second per lobby socket.
 
 ## Signed attachment
 

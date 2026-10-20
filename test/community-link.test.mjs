@@ -80,7 +80,7 @@ test('unprepared, incompatible, foreign lobby, bad proof, stale epoch and reused
     wrong.send({t:'auth',sig:sign(null,proofBytes('PT-COMMUNITY-LINK',b64(challenge.nonce,32,32),communityLinkTail(offers[1])),privateKey(b64(f.profiles[0].seed,32,32))).toString('base64')});assert.equal((await wrong.next('err')).code,'bad_proof');
     const replay=await f.raw();f.hello(replay,offers[1]);assert.equal((await replay.next('err')).code,'link_bad_ticket');
     f.lobbies[1].send({t:'community.link.ticket',session:offers[1].session,epoch:offers[1].epoch});const replacement=await f.lobbies[1].next('community.link.offer');assert.notEqual(replacement.ticket,offers[1].ticket);await f.attach(1,replacement);await f.attach(0,offers[0]);
-    const other=await f.add(f.profiles[1]);other.send({t:'community.link.cancel'});assert.equal((await other.next('err')).code,'link_wrong_lobby');
+    const other=await f.add(f.profiles[1]);other.send({t:'community.link.cancel'});await other.next('community.link.cancelled');assert.equal(f.hub.communityLink.sessions.size,1,'another lobby cannot cancel the frozen socket');
   }finally{await f.close();}
 });
 
@@ -133,6 +133,21 @@ test('outsiders cannot allocate, and another account cannot reuse a captured non
     a.send({t:'auth',sig});assert.equal((await a.next('community.link.ready')).seat,0);
     // A user cannot start forwarding until the complete immutable roster joins.
     a.ws.send(Buffer.from([1,255,1]));assert.equal((await a.next('err')).code,'link_not_ready');await f.lobbies[0].next('community.link.ended');
+  }finally{await f.close();}
+});
+
+test('cancel withdraws preparation before allocation and acknowledges without party or session',async()=>{
+  const f=await fixture();try{
+    await f.prepare(0);await f.prepare(1);
+    f.lobbies[1].send({t:'community.link.cancel'});await f.lobbies[1].next('community.link.cancelled');
+    f.lobbies[0].send({t:'community.link.open',request_id:randomUUID()});assert.equal((await f.lobbies[0].next('err')).code,'link_incompatible_member');assert.equal(f.hub.communityLink.sessions.size,0);
+    f.lobbies[1].send({t:'community.link.cancel'});await f.lobbies[1].next('community.link.cancelled');
+    await f.prepare(1);const {offers}=await f.allocate();await f.attach(0,offers[0]);await f.attach(1,offers[1]);
+    f.lobbies[1].send({t:'community.link.cancel'});await f.lobbies[1].next('community.link.ended');await f.lobbies[1].next('community.link.cancelled');assert.equal(f.hub.communityLink.sessions.size,0);
+    f.lobbies[1].send({t:'party.leave'});await f.lobbies[1].next('party');
+    f.lobbies[1].send({t:'community.link.prepare',...fingerprint});await f.lobbies[1].next('community.link.prepared');
+    f.lobbies[1].send({t:'community.link.cancel'});await f.lobbies[1].next('community.link.cancelled');
+    const lobby=[...f.hub.connections].find(c=>c.kind==='lobby'&&c.player===f.profiles[1].player_id);assert.equal(lobby.communityLinkPrepared,undefined);
   }finally{await f.close();}
 });
 
