@@ -17,16 +17,16 @@ community friend codes are available. See [verification status](https://github.c
 
 ## Download
 
-**[Download the shared server / relay source — dev11 preview](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/download/v0.1.0-dev.11/PokemonPlatinumTogetherOpenSourced-Server-dev11.zip)**
+**[Download the shared server / relay source — dev12 preview](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/download/v0.1.0-dev.12/PokemonPlatinumTogetherOpenSourced-Server-dev12.zip)**
 
 Extract the ZIP, install Node.js 24.12 or newer, and follow [Setup and tests](#setup-and-tests)
 and the [complete hosting guide](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher/blob/main/PrivateServer/docs/server-hosting.md).
 The package includes vendored dependencies, config examples and tests. Enroll the
 owner locally before exposing the listener. Keep generated account/data files private.
 
-[Release notes and SHA-256 checksum](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/tag/v0.1.0-dev.11).
+[Release notes and SHA-256 checksum](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/tag/v0.1.0-dev.12).
 [All five projects and downloads](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher#downloads).
-The public dev11 build is the **Latest release** and remains a **development preview**.
+The public dev12 build is the **Latest release** and remains a **development preview**.
 For Windows apps and bundled runtimes, use the [full Windows bundle](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher#downloads).
 
 ## Related projects
@@ -40,7 +40,7 @@ For Windows apps and bundled runtimes, use the [full Windows bundle](https://git
 Use Node 24.12 or newer. The vendored `ws` dependency keeps its MIT license.
 
 ```powershell
-node --test test/backend.test.mjs
+node --test test/*.test.mjs
 node main.mjs enroll --data ./Data --name HostName --url http://127.0.0.1:8788 --out ./Data/host.json
 node main.mjs serve --data ./Data --port 8788 --bind 127.0.0.1 --url http://127.0.0.1:8788
 ```
@@ -66,7 +66,7 @@ plugin or network-setting panels.
 ```sh
 node main.mjs init-config
 node main.mjs check-config
-node --test test/backend.test.mjs test/config.test.mjs
+node --test test/*.test.mjs
 node main.mjs serve --config server.json
 ```
 
@@ -108,9 +108,9 @@ Automatic shortcut handoff, remote gameplay, Soul Link startup, cross-map
 independence and unattended simulation remain incomplete.
 
 
-## Dev11 interoperability checks
+## Dev12 interoperability checks
 
-All 28 backend tests pass locally with the bundled Node 24 runtime. Relay tests
+All 40 backend tests pass locally with the bundled Node 24 runtime. Relay tests
 authenticate and route both an older fixture build and the official 0.1.7 gameplay
 release ID. They check world/session/seat/epoch/roster fields, native ready limits,
 wrong-build refusal without consuming a valid ticket, replay rejection and binary
@@ -120,7 +120,6 @@ pass. See the launcher status page for remaining native acceptance checks.
 
 ## Independent-client migration
 
-Dev12 source updates are staged; the download above remains the published dev11
-preview. New releases are paused while the [source gameplay client](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-client)
-is developed. Confirmed reference-client gameplay does not establish 1:1 parity
-or private-server integration in that new client.
+Dev12 publishes the tested revision 6 server tools. The [source gameplay client](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-client)
+is developed separately; its binary releases remain paused. Confirmed reference-client
+gameplay does not establish 1:1 parity or server integration in that new client.

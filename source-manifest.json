@@ -12,12 +12,16 @@
     "sha256": "dfaaf0c846e76f0739de23c7d083a60bc5a3a593379129e73e94892819e04aed"
   },
   {
+    "path": "CHANGELOG.md",
+    "sha256": "2f54ef3e38c6713527c15deb10e163ed2868e911501eb87473d2935246b7df5c"
+  },
+  {
     "path": "LICENSE",
     "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
   },
   {
     "path": "README.md",
-    "sha256": "3cf39ed0e0910626c3b91ebae0185855ccf5dac25d902074d65d1037308a338a"
+    "sha256": "e87393db79f32ce32ba8166c67921ac7b4aaf4cc6211b55187e4156e8051725d"
   },
   {
     "path": "THIRD_PARTY_NOTICES.md",
