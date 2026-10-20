@@ -4,6 +4,11 @@ Compatible private accounts, unique usernames, friends, parties, relay routing,
 chat, owner-signed mail and SQLite world/save storage. Original game assets and
 official backend code are not included. Native unattended simulation is unfinished.
 
+Multiplayer support targets matching project-prepared clients. Joining a project
+host from a stock official client is unsupported in this preview; a user reported
+**World not found**. Private accounts, friends and relay use the selected private
+backend. See [connection compatibility](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher/blob/main/PrivateServer/docs/players.md#connection-compatibility).
+
 ## Download
 
 **[Download the shared server / relay source â€” dev11 preview](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/download/v0.1.0-dev.11/PokemonPlatinumTogetherOpenSourced-Server-dev11.zip)**
