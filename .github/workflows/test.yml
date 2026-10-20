@@ -10,4 +10,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: node --test test/backend.test.mjs
+      - run: node --test test/backend.test.mjs test/config.test.mjs

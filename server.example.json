@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Platinum Private Worlds",
+  "role": "combined",
+  "data": "../Data",
+  "network": {
+    "bind": "127.0.0.1",
+    "port": 8788,
+    "publicUrl": null,
+    "trustedLoopbackProxy": false
+  },
+  "logging": { "enabled": true },
+  "plugins": { "enabled": true, "directory": "../Data/Plugins" }
+}

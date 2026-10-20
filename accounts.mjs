@@ -14,6 +14,7 @@ export class Accounts {
     this.validate(m);const now=Date.now();for(const[k,v]of this.challenges)if(v.expires<now)this.challenges.delete(k);for(const[k,v]of this.rates)if(v.until<now)this.rates.delete(k);
     const ip=req.socket.remoteAddress,rate=this.rates.get(ip)??{until:now+60000,count:0};if(++rate.count>30||this.challenges.size>=1024)fail('account_rate_limit');this.rates.set(ip,rate);
     if(m.action==='register'){
+      if(!this.hub.store.db.prepare('SELECT 1 FROM players LIMIT 1').get()&&(!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress)||req.headers?.['cf-connecting-ip']||req.headers?.['x-forwarded-for']))fail('owner_not_initialized');
       if(this.hub.store.db.prepare('SELECT 1 FROM players WHERE key=?').get(m.key))fail('already_enrolled');
       if(this.hub.store.db.prepare('SELECT 1 FROM players WHERE lower(name)=lower(?)').get(m.username))fail('username_taken');
     }else if(!this.hub.store.db.prepare('SELECT 1 FROM players WHERE key=? AND disabled=0').get(m.key))fail('account_not_found');

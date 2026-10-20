@@ -1,6 +1,10 @@
+import {adminClient} from '../admin-client.mjs';
+import {canonicalIp} from '../moderation.mjs';
+import {lobbyRenewProof} from '../lobby-renew.mjs';
+import {Social} from '../social.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,rmSync,readFileSync,writeFileSync,unlinkSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,existsSync,rmSync,readFileSync,writeFileSync,unlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID,sign,randomBytes,generateKeyPairSync} from 'node:crypto';
@@ -8,11 +12,12 @@ import {mailProof} from '../mail.mjs';
 import {inboxClient} from '../inbox-client.mjs';
 import {WebSocket} from '../vendor/ws/wrapper.mjs';
 import {Hub} from '../hub.mjs';
-import {newClient,privateKey,proofBytes,readToken,sha,b64} from '../identity.mjs';
+import {newClient,privateKey,proofBytes,readToken,issueToken,sha,b64} from '../identity.mjs';
 import {refreshProof} from '../refresh.mjs';
 import {controlBytes} from '../control.mjs';
 import {accountBytes} from '../accounts.mjs';
 import {accountClient} from '../account-client.mjs';
+import {worldsClient} from '../worlds-client.mjs';
 
 class Client {
   constructor(url){this.ws=new WebSocket(url);this.messages=[];this.waiters=[];this.ws.on('message',(b,binary)=>{const m=binary?{t:'binary',data:Buffer.from(b)}:JSON.parse(b);const i=this.waiters.findIndex(w=>w.type===m.t);if(i>=0){const [w]=this.waiters.splice(i,1);clearTimeout(w.timer);w.resolve(m);}else this.messages.push(m);});}
@@ -29,6 +34,33 @@ async function connect(hub,profile,ticket){
   c.ready=await c.next(ticket?'ready':'lobby.ready');return c;
 }
 async function ticket(c,realm){c.send({t:'realm.enter',realm});return c.next('realm.ticket');}
+
+test('Discord invites expire, respect party ownership and require the recipient account to join',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-discord-')),hub=new Hub({dir,port:0,log:false}),clients=[];
+ try{
+  await hub.start();const address=hub.url;
+  const profiles=['InviteHost','InviteGuest'].map(name=>{const key=newClient(),p={...key,...hub.enroll(name,key.key)};hub.store.putTrainer(p.player_id,{name:name.slice(0,10),look:0,outfit:0,tutorial_done:true,revision:0});return p;});
+  for(const p of profiles)clients.push(await connect(hub,p));
+  clients[0].send({t:'party.create'});const party=(await clients[0].next('party')).party;
+  assert.equal(hub.discordInvites.create(profiles[0].player_id),null,'loopback must not be shared');
+  hub.url='https://world.example.com';
+  clients[0].send({t:'private.discord.invite'});const invite=(await clients[0].next('private.discord.invite')).invite;
+  assert.equal(invite.party,party.id);assert.ok(Buffer.byteLength(invite.secret)<=128);
+  assert.equal(hub.discordInvites.create(profiles[0].player_id).secret,invite.secret,'reuse until near expiry');
+  assert.equal(hub.discordInvites.create(profiles[1].player_id),null);
+  const key=invite.secret.split('/').at(-1),resolved=await fetch(address+'/private/j/'+key).then(r=>r.json());
+  assert.equal(resolved.code,party.code);assert.equal(resolved.hub_key,hub.identity.pin);
+  assert.equal(hub.social.party(profiles[1].player_id),undefined,'resolving never joins or authenticates');
+  for(const field of ['seed','token','refresh_token','ticket','key'])assert.equal(Object.hasOwn(resolved,field),false);
+  clients[1].send({t:'party.join',code:resolved.code});assert.equal((await clients[1].next('party')).party.id,party.id);
+  hub.discordInvites.invites.get(key).expires=Date.now()-1;
+  assert.equal((await fetch(address+'/private/j/'+key).then(r=>r.json())).error,'invite_expired');
+  const next=hub.discordInvites.create(profiles[0].player_id);assert.notEqual(next.secret,invite.secret);
+  hub.social.leave(profiles[0].player_id);assert.throws(()=>hub.discordInvites.resolve(next.secret.split('/').at(-1)),e=>e.code==='invite_expired');
+  const successor=hub.discordInvites.create(profiles[1].player_id);assert.notEqual(successor.secret,next.secret);
+  assert.equal(hub.discordInvites.resolve(successor.secret.split('/').at(-1)).name,'InviteGuest');
+ }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
 
 test('custom Pokemon, egg and item gifts require the recipient key and acknowledge a bound delivery once',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'pt-mart-'));let hub=new Hub({dir,port:0,log:false});
@@ -51,7 +83,7 @@ test('native relay allocation, nonce proof, ticket replay refusal and authentica
     for(const p of profiles)clients.push(await connect(hub,p));
     clients[0].send({t:'party.invite',player:profiles[1].player_id});const invite=await clients[1].next('party.invited');await clients[0].next('party.invite.sent');clients[1].send({t:'party.join',party:invite.party});await clients[1].next('party');
     clients[2].send({t:'party.world.join',request_id:randomUUID()});assert.equal((await clients[2].next('err')).code,'party_required');
-    clients[0].send({t:'party.world.join',request_id:randomUUID()});const host=await clients[0].next('party.world'),guest=await clients[1].next('party.world');assert.equal(host.session,guest.session);assert.equal(host.seat,0);assert.equal(guest.seat,1);
+    clients[0].send({t:'party.world.join',request_id:randomUUID()});const host=await clients[0].next('party.world'),guest=await clients[1].next('party.world');assert.equal(host.session,guest.session);assert.equal(host.seat,0);assert.equal(guest.seat,1);assert.equal(host.asked_by,null);assert.equal(guest.asked_by,null);
     async function join(p,t){const c=await new Client(hub.url.replace('http:','ws:')+'/relay').open();clients.push(c);c.send({t:'hello',pt:1,ticket:t.ticket,build:'test-015'});const challenge=await c.next('challenge');c.send({t:'auth',sig:sign(null,b64(challenge.nonce,32,32),privateKey(b64(p.seed,32,32))).toString('base64')});await c.next('ready');return c;}
     const a=await join(profiles[0],host),b=await join(profiles[1],guest);
     a.ws.send(Buffer.from([1,255,7,8,9]));assert.deepEqual((await b.next('binary')).data,Buffer.from([1,0,7,8,9]));
@@ -219,4 +251,140 @@ test('private accounts reserve unique names, require their own key, rename safel
     const recovered=await accountClient('register',{url:hub.url,name:'NewName',out:file});assert.equal(recovered.player,created.player);
     await hub.close();hub=new Hub({dir,port:0,log:false});await hub.start();assert.equal(hub.store.player(created.player).name,'NewName');assert.equal(hub.store.db.prepare('SELECT COUNT(*) n FROM players WHERE lower(name)=?').get('newname').n,1);
   }finally{await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('party codes match the native client character restrictions',()=>{
+ const fake={store:{trainer:()=>({name:'Test',look:0,outfit:0})}};
+ const social=new Social(fake);
+ const codes=new Set();
+ for(let i=0;i<200;i++){const code=social.create(String(i)).code;assert.match(code,/^[A-HJKMNP-Z2-9]{6}$/);assert.ok(!codes.has(code));codes.add(code);}
+});
+
+
+test('native code joins use code field and preserve party consent',()=>{
+ const sent=[];const fake={store:{trainer:()=>({name:'Test',look:0,outfit:0})},connections:[],send:(_,m)=>sent.push(m)};
+ const social=new Social(fake);social.update=()=>{};const p=social.create('1');
+ assert.throws(()=>social.handle({player:'2'},{t:'party.join',code:'000000'}),e=>e.code==='bad_party_code');
+ assert.throws(()=>social.handle({player:'2'},{t:'party.join',code:p.code,party:p.id}),e=>e.code==='bad_party_code');
+ social.handle({player:'2'},{t:'party.join',code:p.code});assert.deepEqual(p.members,['1','2']);
+ assert.throws(()=>social.handle({player:'3'},{t:'party.join',party:p.id}),e=>e.code==='invite_expired');
+});
+
+
+test('native lobby renewal verifies possession, refuses another key and repeats lost acknowledgements',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-renew-')),hub=new Hub({dir,port:0,log:false});let c;
+ try {await hub.start();const a=newClient(),b=newClient(),p={...a,...hub.enroll('RenewOne',a.key)};c=await connect(hub,p);
+ const op=randomUUID(),proof=lobbyRenewProof(readToken(hub.identity,p.token).bytes,op),sig=sign(null,proof,privateKey(b64(a.seed,32,32))).toString('base64');
+ c.send({t:'auth.renew',op,sig:sign(null,proof,privateKey(b64(b.seed,32,32))).toString('base64')});assert.equal((await c.next('err')).code,'bad_proof');
+ c.send({t:'auth.renew',op,sig});const r=await c.next('auth.renewed');assert.equal(readToken(hub.identity,r.token).player,p.player_id);
+ c.send({t:'auth.renew',op,sig});assert.deepEqual(await c.next('auth.renewed'),r);
+ c.send({t:'ping',ts:123});assert.equal((await c.next('pong')).ts,123);
+ }finally{c?.close();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('owner-only bans disconnect users, survive restart, normalize IPs and retain local recovery',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-bans-'));let hub=new Hub({dir,port:0,log:false}),guest;
+ try{
+ await hub.start();const a=newClient(),b=newClient(),p={...a,...hub.enroll('BanOwner',a.key)},q={...b,...hub.enroll('BanGuest',b.key)};
+ for(const profile of [p,q])hub.store.putTrainer(profile.player_id,{name:profile.display_name.slice(0,10),look:0,outfit:0,tutorial_done:true,revision:0});
+ const file=join(dir,'owner.json');const saveProfile=()=>writeFileSync(file,JSON.stringify({...p,hub:hub.url,hub_key:hub.identity.pin}));saveProfile();
+ guest=await connect(hub,q);const closed=new Promise(resolve=>guest.ws.once('close',resolve));
+ const result=await adminClient({profile:file,action:'ban-user',target:'banguest',reason:'Test'});assert.equal(result.disconnected,1);await closed;
+ assert.throws(()=>hub.credentials(q.player_id),e=>e.code==='user_banned');
+ // Public friends/profile metadata remains readable after a ban.
+ assert.equal(hub.store.playerInfo(q.player_id).name,'BanGuest');
+ await hub.close();hub=new Hub({dir,port:0,log:false});await hub.start();saveProfile();
+ assert.equal((await adminClient({profile:file,action:'list-bans'})).bans.length,1);
+ await adminClient({profile:file,action:'unban-user',target:'BanGuest'});guest=await connect(hub,q);guest.ws.terminate();
+ await assert.rejects(()=>adminClient({profile:file,action:'ban-user',target:'BanOwner'}),/cannot_ban_server_owner/);
+ assert.equal(canonicalIp('::ffff:127.0.0.1'),'127.0.0.1');assert.equal(canonicalIp('2001:0db8:0:0::1'),'2001:db8::1');
+ await adminClient({profile:file,action:'ban-ip',target:'::ffff:127.0.0.1',reason:'Loopback fixture'});
+ assert.equal((await fetch(hub.url+'/health')).status,403);
+ await assert.rejects(()=>new Client(hub.url.replace('http:','ws:')+'/lobby').open(),/403/);
+ await adminClient({profile:file,action:'unban-ip',target:'127.0.0.1'});assert.equal((await fetch(hub.url+'/health')).status,200);
+ const bad=join(dir,'guest.json');writeFileSync(bad,JSON.stringify({...q,hub:hub.url,hub_key:hub.identity.pin}));
+ await assert.rejects(()=>adminClient({profile:bad,action:'ban-user',target:'BanOwner'}),/not_server_owner/);
+ }finally{guest?.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('relay IP bans trust only explicitly enabled loopback proxy headers',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-proxy-')),hub=new Hub({dir,port:0,log:false});
+ try{await hub.start();const a=newClient(),p={...a,...hub.enroll('ProxyOwner',a.key)},file=join(dir,'owner.json');writeFileSync(file,JSON.stringify({...p,hub:hub.url,hub_key:hub.identity.pin}));
+ await adminClient({profile:file,action:'ban-ip',target:'198.51.100.9'});
+ const options={headers:{'CF-Connecting-IP':'198.51.100.9'}};
+ assert.equal((await fetch(hub.url+'/health',options)).status,200);
+ await adminClient({profile:file,action:'proxy-local',target:'on'});assert.equal((await fetch(hub.url+'/health',options)).status,403);
+ assert.equal(hub.moderation.address({socket:{remoteAddress:'192.0.2.8'},headers:{'cf-connecting-ip':'198.51.100.9'}}),'192.0.2.8');
+ await adminClient({profile:file,action:'proxy-local',target:'off'});assert.equal((await fetch(hub.url+'/health',options)).status,200);
+ }finally{await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('local plugins handle authenticated calls, isolate hangs and reload without stopping the server',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-plugins-')),hub=new Hub({dir,port:0,log:false});let c;
+ const install=(id,code,enabled=true,entry='main.mjs')=>{const folder=join(dir,'Plugins',id);mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'plugin.json'),JSON.stringify({id,version:'1.0.0',entry,enabled}));writeFileSync(join(folder,'main.mjs'),code);};
+ install('echo',"export async function onEvent(e){if(e.type==='call')return {echo:e.data.args,player:e.data.player,keys:Object.keys(e.data).sort()};}");
+ install('hang',"export function onEvent(e){if(e.type==='call')while(true){};}");
+ install('disabled',"throw new Error('Must not import');",false);
+ install('escape','',true,'../outside.mjs');
+ try{await hub.start();const a=newClient(),p={...a,...hub.enroll('PluginOwner',a.key)},file=join(dir,'owner.json');writeFileSync(file,JSON.stringify({...p,hub:hub.url,hub_key:hub.identity.pin}));
+ c=await connect(hub,p);const op=randomUUID();c.send({t:'plugin.call',plugin:'echo',op,args:{hello:'world'}});const r=await c.next('plugin.result');assert.equal(r.op,op);assert.deepEqual(r.data.echo,{hello:'world'});assert.deepEqual(r.data.keys,['args','player','username']);
+ const list=(await adminClient({profile:file,action:'plugins-list'})).plugins;assert.equal(list.find(x=>x.id==='disabled').state,'disabled');assert.equal(list.find(x=>x.id==='escape').state,'failed');
+ c.send({t:'plugin.call',plugin:'hang',op:randomUUID()});assert.equal((await fetch(hub.url+'/health')).status,200);assert.equal((await c.next('err')).code,'plugin_timeout');
+ assert.equal((await adminClient({profile:file,action:'plugins-list'})).plugins.find(x=>x.id==='hang').state,'failed');
+ install('hang',"export function onEvent(e){if(e.type==='call')return {fixed:true};}");
+ await adminClient({profile:file,action:'plugins-reload'});c.send({t:'plugin.call',plugin:'hang',op:randomUUID()});assert.equal((await c.next('plugin.result')).data.fixed,true);
+ c.send({t:'ping',ts:99});assert.equal((await c.next('pong')).ts,99);
+ }finally{c?.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('plugins use the existing native chat command flow with private durable replies and no duplicate execution',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-plugin-chat-')),folder=join(dir,'Plugins','greet');mkdirSync(folder,{recursive:true});
+ writeFileSync(join(folder,'plugin.json'),JSON.stringify({id:'greet',version:'1.0.0',enabled:true,entry:'main.mjs'}));
+ writeFileSync(join(folder,'main.mjs'),"let count=0;export function onEvent(e){if(e.type==='command')return {reply:'Hello '+e.data.args+' #'+(++count)};}");
+ const hub=new Hub({dir,port:0,log:false});let a,b;
+ try{await hub.start();const p=newClient(),q=newClient();a=await connect(hub,{...p,...hub.enroll('CmdOwner',p.key)});b=await connect(hub,{...q,...hub.enroll('CmdGuest',q.key)});
+ for(const c of [a,b]){c.send({t:'chat.join',channel:'global'});await c.next('chat');}
+ const command={t:'chat.send',channel:'global',op:randomUUID(),text:'/greet world'};a.send(command);assert.equal((await a.next('chat.new')).msg.text,command.text);
+ const reply=(await a.next('chat.new')).msg;assert.equal(reply.kind,'system');assert.equal(reply.text,'[greet] Hello world #1');assert.equal(b.messages.filter(m=>m.t==='chat.new').length,0);
+ a.send(command);await a.next('chat.new');assert.equal((await a.next('chat.new')).msg.id,reply.id);
+ b.send({t:'chat.get',channel:'global'});assert.equal((await b.next('chat')).msgs.length,0);
+ a.send({t:'chat.get',channel:'global'});assert.equal((await a.next('chat')).msgs.length,2);
+ }finally{a?.ws.terminate();b?.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('joined worlds record authenticated entry, isolate players and persist across restarts',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-world-list-'));let hub=new Hub({dir,port:0,log:false});const clients=[];
+ try{
+  await hub.start();const a=newClient(),b=newClient(),d=newClient();
+  const owner={...a,...hub.enroll('ListOwner',a.key)},guest={...b,...hub.enroll('ListGuest',b.key)},other={...d,...hub.enroll('ListOther',d.key)};
+  const file=join(dir,'guest.json');const saveProfile=()=>writeFileSync(file,JSON.stringify({...guest,hub:hub.url,hub_key:hub.identity.pin}));saveProfile();
+  const r=hub.store.create(owner.player_id,'A real world');hub.store.invite(String(r.id),owner.player_id,guest.player_id);
+  assert.deepEqual((await worldsClient({profile:file})).worlds,[]);
+  const lobby=await connect(hub,guest);clients.push(lobby);const entry=await ticket(lobby,String(r.id));
+  assert.deepEqual(hub.store.joinedWorlds(guest.player_id),[]);
+  const realm=await connect(hub,guest,entry);clients.push(realm);
+  const listed=await worldsClient({profile:file});assert.equal(listed.worlds.length,1);assert.equal(listed.worlds[0].name,'A real world');assert.equal(listed.worlds[0].owner_name,'ListOwner');
+  assert.deepEqual(hub.store.joinedWorlds(other.player_id),[]);
+  for(const c of clients)c.close();await hub.close();hub=new Hub({dir,port:0,log:false});await hub.start();saveProfile();
+  assert.equal((await worldsClient({profile:file})).worlds[0].world,String(r.id));
+  hub.store.db.prepare('DELETE FROM members WHERE realm=? AND player=?').run(r.id,guest.player_id);
+  assert.deepEqual((await worldsClient({profile:file})).worlds,[]);
+ }finally{for(const c of clients)c.close();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('Inverna and world hosting roles expose and enforce their own protocol features',async()=>{
+ for(const role of ['inverna','world']){
+  const dir=mkdtempSync(join(tmpdir(),'pt-role-'));const hub=new Hub({dir,port:0,role,log:false});let c;
+  try{
+   await hub.start();const key=newClient(),p={...key,...hub.enroll('RoleOwner',key.key)};c=await connect(hub,p);
+   assert.equal(c.ready.features.city,role==='inverna');assert.equal(c.ready.features.realms,role==='world');assert.equal(c.ready.features.player_worlds,false);
+   c.send(role==='inverna'?{t:'realm.create',name:'Refused'}:{t:'city.enter',district:'plaza'});
+   assert.equal((await c.next('err')).code,role==='inverna'?'world_server_required':'inverna_server_required');
+  }finally{c?.close();await hub.close();rmSync(dir,{recursive:true,force:true});}
+ }
 });

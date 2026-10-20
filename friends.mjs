@@ -6,7 +6,7 @@ export class Friends {
   peers(id){return this.db.prepare('SELECT CASE WHEN a=? THEN b ELSE a END AS id FROM friendships WHERE a=? OR b=?').all(id,id,id).map(x=>String(x.id));}
   lookup(username){text(username,16);const rows=this.db.prepare('SELECT * FROM players WHERE lower(name)=lower(?) AND disabled=0').all(username);if(rows.length!==1)fail('username_unknown');return rows[0];}
   snapshot(id){
-    const me=this.hub.store.player(id),username=player=>this.hub.store.player(String(player)).name;
+    const me=this.hub.store.playerInfo(id),username=player=>this.hub.store.playerInfo(String(player)).name;
     return {t:'social',me:{username:me.name,gp:0,badges:0,chat_lang:'en'},friends:this.peers(id).map(player=>{const online=this.hub.social.online(player);return {username:username(player),name:this.hub.store.trainer(player)?.name??username(player),online:online.length>0,where:online.some(c=>c.city)?'city':this.hub.connections.values().some(c=>c.authenticated&&c.kind==='realm'&&c.player===player)?'world':''};}),requests_in:this.db.prepare('SELECT sender FROM friend_requests WHERE recipient=? ORDER BY at_ms LIMIT 50').all(id).map(r=>username(r.sender)),requests_out:this.db.prepare('SELECT recipient FROM friend_requests WHERE sender=? ORDER BY at_ms LIMIT 50').all(id).map(r=>username(r.recipient)),guild:null,guild_invites:[],receipts:[],server_ms:Date.now()};
   }
   update(id){this.hub.social.send(id,this.snapshot(id));}
@@ -32,7 +32,7 @@ export class Friends {
         this.db.prepare('DELETE FROM friend_requests WHERE (sender=? AND recipient=?) OR (sender=? AND recipient=?)').run(c.player,target,target,c.player);
       }
     });
-    if(m.t==='friend.add')this.hub.social.send(target,{t:'friend.request',from:this.hub.store.player(c.player).name});
+    if(m.t==='friend.add')this.hub.social.send(target,{t:'friend.request',from:this.hub.store.playerInfo(c.player).name});
     this.update(c.player);this.update(target);return true;
   }
 }

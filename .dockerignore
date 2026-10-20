@@ -1,0 +1,9 @@
+Data/
+.git/
+server.json
+*.pem
+*.sqlite*
+*.log
+.env
+*player*.json
+*profile*.json

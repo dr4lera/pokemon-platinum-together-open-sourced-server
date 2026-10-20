@@ -20,3 +20,5 @@ GiftReceipts/
 *-selftest.json
 selftest.json
 layout-check.json
+
+/server.json

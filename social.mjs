@@ -1,6 +1,9 @@
-import {randomBytes,randomUUID} from 'node:crypto';
+import {randomInt,randomUUID} from 'node:crypto';
 import {fail} from './identity.mjs';
 import {text} from './store.mjs';
+
+// The native six-character parser rejects 0, O, 1, I and L.
+const PARTY_CODE_ALPHABET='ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
 // These response shapes are accepted by the actual 0.1.5 native lobby parser.
 export class Social {
@@ -11,7 +14,7 @@ export class Social {
   party(player){return this.parties.get(this.membership.get(player));}
   snapshot(p){return {id:p.id,code:p.code,leader:p.leader,listed:p.listed,busy:false,profile_id:null,members:p.members.map(player=>({...this.profile(player),online:this.online(player).length>0}))};}
   update(p){for(const player of p.members)this.send(player,{t:'party',party:this.snapshot(p)});}
-  create(player){this.profile(player);if(this.party(player))fail('already_in_party');if(this.parties.size>=256)fail('busy');let code;do{code=randomBytes(4).toString('hex').slice(0,6).toUpperCase();}while([...this.parties.values()].some(p=>p.code===code));const p={id:randomUUID(),code,leader:player,members:[player],listed:false};this.parties.set(p.id,p);this.membership.set(player,p.id);return p;}
+  create(player){this.profile(player);const current=this.party(player);if(current){if(current.leader!==player)fail('already_in_party');return current;}if(this.parties.size>=256)fail('busy');let code;do{code=Array.from({length:6},()=> PARTY_CODE_ALPHABET[randomInt(PARTY_CODE_ALPHABET.length)]).join('');}while([...this.parties.values()].some(p=>p.code===code));const p={id:randomUUID(),code,leader:player,members:[player],listed:false};this.parties.set(p.id,p);this.membership.set(player,p.id);return p;}
   leave(player){const p=this.party(player);if(!p){this.send(player,{t:'party',party:null});return;}this.hub.relay.cancel(player);p.members=p.members.filter(x=>x!==player);this.membership.delete(player);this.send(player,{t:'party',party:null});for(const[k,v]of this.invites)if(v.party===p.id&&(v.from===player||v.to===player))this.invites.delete(k);if(!p.members.length){this.parties.delete(p.id);return;}if(p.leader===player)p.leader=p.members[0];this.update(p);}
   sweep(){for(const[k,v]of this.invites)if(v.expires<Date.now())this.invites.delete(k);}
   connected(c){const p=this.party(c.player);if(p)this.update(p);this.hub.friends.presence(c.player);}
@@ -37,8 +40,8 @@ export class Social {
       const invite={party:p.id,from:c.player,to:target,expires:Date.now()+60000};this.invites.set(key,invite);this.update(p);this.send(target,{t:'party.invited',party:p.id,from:this.profile(c.player),members:p.members.length,expires_ms:invite.expires,server_ms:Date.now()});this.hub.send(c,{t:'party.invite.sent',player:target});return true;
     }
     if(m.t==='party.join'){
-      text(m.party,64);const p=this.parties.get(m.party)??[...this.parties.values()].find(p=>p.code===m.party.toUpperCase());if(!p)fail('party_not_found');if(this.party(c.player))fail('already_in_party');this.profile(c.player);
-      const invite=this.invites.get(p.id+':'+c.player);if(!p.listed&&p.code!==m.party.toUpperCase()&&(!invite||invite.expires<Date.now()))fail('invite_expired');if(p.members.length>=4)fail('party_full');
+      const selector=m.code??m.party;text(selector,64);if(m.code!==undefined&&(m.party!==undefined||!/^[A-HJKMNP-Z2-9]{6}$/.test(m.code)))fail('bad_party_code');const p=this.parties.get(selector)??[...this.parties.values()].find(p=>p.code===selector.toUpperCase());if(!p)fail('party_not_found');const current=this.party(c.player);if(current){if(current.id!==p.id)fail('already_in_party');this.update(p);return true;}this.profile(c.player);
+      const invite=this.invites.get(p.id+':'+c.player);if(!p.listed&&p.code!==selector.toUpperCase()&&(!invite||invite.expires<Date.now()))fail('invite_expired');if(p.members.length>=4)fail('party_full');
       this.invites.delete(p.id+':'+c.player);p.members.push(c.player);this.membership.set(c.player,p.id);this.update(p);return true;
     }
     if(m.t==='party.decline'){const p=this.parties.get(m.party);if(!p)fail('party_not_found');const invite=this.invites.get(p.id+':'+c.player);if(!invite||invite.expires<Date.now())fail('invite_expired');this.invites.delete(p.id+':'+c.player);this.send(invite.from,{t:'party.declined',player:c.player});return true;}

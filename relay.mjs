@@ -16,7 +16,7 @@ export class Relay {
     if(!s){if(this.sessions.size>=128)fail('busy');let record=this.hub.store.db.prepare('SELECT world FROM relay_worlds WHERE owner=?').get(party.leader);if(!record){record={world:randomUUID()};this.hub.store.db.prepare('INSERT INTO relay_worlds VALUES(?,?)').run(party.leader,record.world);}s={id:randomUUID(),world:record.world,host:party.leader,party:party.id,players:[],epoch:1,activity:Date.now(),build:null};this.sessions.set(s.id,s);}
     if(!s.players.length)s.players=[party.leader];for(const player of party.members)if(!s.players.includes(player)){let seat=s.players.indexOf(null);if(seat<0)seat=s.players.length;if(seat>3)fail('session_full');s.players[seat]=player;}s.activity=Date.now();
     if(this.tickets.size>4096)fail('busy');
-    for(const player of s.players){if(!this.hub.social.online(player).length)continue;const ticket=randomBytes(32).toString('base64'),key=sha(ticket).toString('hex');this.tickets.set(key,{player,session:s.id,expires:Date.now()+60000});this.hub.social.send(player,{t:'party.world',request_id:m.request_id,world:s.world,session:s.id,ticket,relay_url:this.hub.url.replace(/^http/,'ws')+'/relay',seat:s.players.indexOf(player),host:this.hub.social.profile(s.host),asked_by:c.player===s.host?null:c.player});}
+    for(const player of s.players){if(!this.hub.social.online(player).length)continue;const ticket=randomBytes(32).toString('base64'),key=sha(ticket).toString('hex');this.tickets.set(key,{player,session:s.id,expires:Date.now()+60000});this.hub.social.send(player,{t:'party.world',request_id:m.request_id,world:s.world,session:s.id,ticket,relay_url:this.hub.url.replace(/^http/,'ws')+'/relay',seat:s.players.indexOf(player),host:this.hub.social.profile(s.host),asked_by:player===s.host&&c.player!==s.host?c.player:null});}
     return true;
   }
   lobby(c,m){if(m.t==='party.world.join')return this.allocate(c,m);if(m.t==='party.world.cancel'){this.cancel(c.player);return true;}return false;}
@@ -27,7 +27,7 @@ export class Relay {
     }
     if(c.phase!=='proof'||m.t!=='auth')fail('bad_auth');const t=this.tickets.get(c.ticketHash),s=this.sessions.get(c.session);if(!t||!s||t.expires<Date.now()||!s.players.includes(c.player))fail('bad_ticket');
     if(!verify(null,c.nonce,publicKey(b64(this.hub.store.player(c.player).key,32,32)),b64(m.sig,64,64)))fail('bad_proof');if(s.build&&s.build!==c.build)fail('version');
-    this.tickets.delete(c.ticketHash);s.build=c.build;c.seat=s.players.indexOf(c.player);for(const old of this.peers(s))if(old.player===c.player){old.authenticated=false;old.ws.close(1008,'reconnected');}
+    this.tickets.delete(c.ticketHash);this.hub.store.visit(c.player,'relay',s.world,s.host,this.hub.store.playerInfo(s.host).name+"'s world");s.build=c.build;c.seat=s.players.indexOf(c.player);for(const old of this.peers(s))if(old.player===c.player){old.authenticated=false;old.ws.close(1008,'reconnected');}
     c.authenticated=true;c.phase='ready';c.expires=Date.now()+3600000;c.budget=limits.game_burst_bytes;c.refill=Date.now();s.activity=Date.now();
     this.hub.send(c,{t:'ready',world:s.world,session:s.id,seat:c.seat,epoch:s.epoch,roster:this.roster(s),limits});this.update(s);
   }
