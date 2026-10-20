@@ -1,3 +1,4 @@
+import {TokenBucket,TrafficWindow} from './elapsed-limits.mjs';
 import {randomUUID,randomBytes,verify} from 'node:crypto';
 import {b64,sha,fail,publicKey} from './identity.mjs';
 import {routeFrame} from './frames.mjs';
@@ -28,14 +29,13 @@ export class Relay {
     if(c.phase!=='proof'||m.t!=='auth')fail('bad_auth');const t=this.tickets.get(c.ticketHash),s=this.sessions.get(c.session);if(!t||!s||t.expires<Date.now()||!s.players.includes(c.player))fail('bad_ticket');
     if(!verify(null,c.nonce,publicKey(b64(this.hub.store.player(c.player).key,32,32)),b64(m.sig,64,64)))fail('bad_proof');if(s.build&&s.build!==c.build)fail('version');
     this.tickets.delete(c.ticketHash);this.hub.store.visit(c.player,'relay',s.world,s.host,this.hub.store.playerInfo(s.host).name+"'s world");s.build=c.build;c.seat=s.players.indexOf(c.player);for(const old of this.peers(s))if(old.player===c.player){old.authenticated=false;old.ws.close(1008,'reconnected');}
-    c.authenticated=true;c.phase='ready';c.expires=Date.now()+3600000;c.budget=limits.game_burst_bytes;c.refill=Date.now();s.activity=Date.now();
+    c.authenticated=true;c.phase='ready';c.expires=Date.now()+3600000;c.byteBudget=new TokenBucket(limits.game_bytes_per_second,limits.game_burst_bytes);c.gameTraffic=new TrafficWindow(limits.game_frames_per_second,Infinity);s.activity=Date.now();
     this.hub.send(c,{t:'ready',world:s.world,session:s.id,seat:c.seat,epoch:s.epoch,roster:this.roster(s),limits});this.update(s);
   }
   message(c,m){if(m.t==='ping'){if(!Number.isSafeInteger(m.ts))fail('bad_ping');this.hub.send(c,{t:'pong',ts:m.ts});return;}fail('unsupported_message');}
   binary(c,data){
     if(!c.authenticated)fail('not_authenticated');const s=this.sessions.get(c.session);if(!s||!s.players.includes(c.player))fail('session_closed');
-    const now=Date.now();c.budget=Math.min(limits.game_burst_bytes,c.budget+(now-c.refill)*limits.game_bytes_per_second/1000);c.refill=now;if(data.length>c.budget)fail('relay_rate_limit');c.budget-=data.length;
-    if(now-c.frameWindow>=1000||!c.frameWindow){c.frameWindow=now;c.frameCount=0;}if(++c.frameCount>limits.game_frames_per_second)fail('relay_rate_limit');
+    const now=Date.now();if(!c.byteBudget.allow(data.length)||!c.gameTraffic.allow(data.length))fail('relay_rate_limit');
     const peers=this.peers(s),r=routeFrame(data,c.seat,peers.map(p=>p.seat));for(const peer of peers)if(r.targets.includes(peer.seat)){if(peer.ws.bufferedAmount>1048576){peer.ws.close(1008,'slow relay consumer');continue;}peer.ws.send(r.wire);}s.activity=now;
   }
   disconnected(c){const s=this.sessions.get(c.session);if(s)this.update(s);}

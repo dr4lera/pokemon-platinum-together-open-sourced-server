@@ -1,3 +1,4 @@
+import {TrafficWindow} from './elapsed-limits.mjs';
 import {createServer} from 'node:http';
 import {mkdirSync, appendFileSync} from 'node:fs';
 import {join} from 'node:path';
@@ -116,13 +117,12 @@ export class Hub {
     }catch(e){this.log('http_rejected',{path:loggedPath,code:e.code??'bad_request'});send(400,{error:e.code??'bad_request'});}
   }
   connected(ws,kind,ip='127.0.0.1'){
-    const c={id:randomUUID(),kind,ws,ip,activity:Date.now(),expires:Date.now()+15000,authenticated:false,phase:'hello',window:Date.now(),messages:0,bytes:0};this.connections.add(c);
+    const c={id:randomUUID(),kind,ws,ip,activity:Date.now(),expires:Date.now()+15000,authenticated:false,phase:'hello',traffic:new TrafficWindow(240,LIMITS.game_burst_bytes)};this.connections.add(c);
     ws.on('error',()=>{});
     ws.on('close',()=>{this.connections.delete(c);if(c.kind==='relay')this.relay.disconnected(c);if(c.authenticated&&c.kind==='lobby')this.social.disconnected(c);if(c.realm){for(const [k,t]of this.transfers)if(t.connection===c.id)this.transfers.delete(k);this.roster(c.realm);}this.log('disconnected',{connection:c.id,kind,player:c.player});if(c.authenticated)this.plugins.emit('player.disconnected',{player:c.player});});
     ws.on('message',(data,binary)=>{
       try{
-        c.activity=Date.now();if(c.activity-c.window>1000){c.window=c.activity;c.messages=0;c.bytes=0;}
-        if(++c.messages>240||(c.bytes+=data.length)>LIMITS.game_burst_bytes)fail('rate_limit');
+        c.activity=Date.now();if(!c.traffic.allow(data.length))fail('rate_limit');
         if(c.authenticated)this.store.player(c.player);
         if(binary){if(c.kind==='relay')this.relay.binary(c,data);else this.binary(c,data);return;}
         const m=JSON.parse(data.toString());if(!m||Array.isArray(m)||typeof m.t!=='string')fail('bad_message');
