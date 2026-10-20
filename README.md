@@ -68,3 +68,16 @@ allocated ticket does not create history: realm/relay authentication must succee
 Realm entries disappear from the returned history after membership is revoked.
 History survives server restart. Protocol authentication does not prove native
 gameplay has loaded successfully; that remains a separate release check.
+
+
+### Native co-op relay entry (0.1.5)
+
+The combined role advertises `player_worlds` for the tested manual relay path.
+The Inverna and persistent-world roles keep that capability disabled.
+The host uses **Host my world → Use Relay**. The guest first loads a local world,
+joins the host's code through Friends, then selects **Menu → Party → Join World**.
+Two unmodified local clients completed this sequence and repeated it after backend
+restart. Party membership alone does not create the native pending world request;
+never invent an unsolicited guest allocation to skip that check.
+Automatic shortcut handoff, remote gameplay, Soul Link startup, cross-map
+independence and unattended simulation remain incomplete.

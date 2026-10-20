@@ -81,6 +81,7 @@ test('native relay allocation, nonce proof, ticket replay refusal and authentica
   try{
     await hub.start();const profiles=['RelayHost','RelayGuest','Outside'].map(name=>{const key=newClient();const p={...key,...hub.enroll(name,key.key)};hub.store.putTrainer(p.player_id,{name:name.slice(0,10),look:0,outfit:0,tutorial_done:true,revision:0});return p;});
     for(const p of profiles)clients.push(await connect(hub,p));
+    assert.equal(clients[0].ready.features.player_worlds,true,'combined backend exposes the verified manual relay join path');
     clients[0].send({t:'party.invite',player:profiles[1].player_id});const invite=await clients[1].next('party.invited');await clients[0].next('party.invite.sent');clients[1].send({t:'party.join',party:invite.party});await clients[1].next('party');
     clients[2].send({t:'party.world.join',request_id:randomUUID()});assert.equal((await clients[2].next('err')).code,'party_required');
     clients[0].send({t:'party.world.join',request_id:randomUUID()});const host=await clients[0].next('party.world'),guest=await clients[1].next('party.world');assert.equal(host.session,guest.session);assert.equal(host.seat,0);assert.equal(guest.seat,1);assert.equal(host.asked_by,null);assert.equal(guest.asked_by,null);
@@ -263,10 +264,14 @@ test('party codes match the native client character restrictions',()=>{
 
 
 test('native code joins use code field and preserve party consent',()=>{
- const sent=[];const fake={store:{trainer:()=>({name:'Test',look:0,outfit:0})},connections:[],send:(_,m)=>sent.push(m)};
+ // Joining a party does not create the native client's pending world request.
+ // An unsolicited allocation here is ignored by guests and must not be mistaken
+ // for a completed world join, even with player_worlds enabled for a fixture.
+ const sent=[];const fake={features:{player_worlds:true},relay:{allocate:()=>assert.fail('party membership allocated a world without a client request')},store:{trainer:()=>({name:'Test',look:0,outfit:0})},connections:[],send:(_,m)=>sent.push(m)};
  const social=new Social(fake);social.update=()=>{};const p=social.create('1');
  assert.throws(()=>social.handle({player:'2'},{t:'party.join',code:'000000'}),e=>e.code==='bad_party_code');
  assert.throws(()=>social.handle({player:'2'},{t:'party.join',code:p.code,party:p.id}),e=>e.code==='bad_party_code');
+ social.handle({player:'2'},{t:'party.join',code:p.code});assert.deepEqual(p.members,['1','2']);
  social.handle({player:'2'},{t:'party.join',code:p.code});assert.deepEqual(p.members,['1','2']);
  assert.throws(()=>social.handle({player:'3'},{t:'party.join',party:p.id}),e=>e.code==='invite_expired');
 });

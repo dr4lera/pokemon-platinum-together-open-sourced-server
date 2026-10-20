@@ -31,7 +31,9 @@ export class Hub {
   constructor({dir,port=8787,host='127.0.0.1',publicUrl,log=true,name='Platinum Private Worlds',role='combined',trustedLoopbackProxy,pluginsEnabled=true,pluginDirectory}={}) {
     if(!dir)throw new Error('A data directory is required');
     if(!['combined','inverna','world'].includes(role))throw new Error('Invalid server role');
-    this.role=role;this.features={...FEATURES,city:role!=='world',realms:role!=='inverna'};
+    // Ordinary 0.1.5 clients can enter relay co-op through Menu > Party >
+    // Join World. Persistent world and Inverna deployments remain separate.
+    this.role=role;this.features={...FEATURES,city:role!=='world',realms:role!=='inverna',player_worlds:role==='combined'};
     mkdirSync(dir,{recursive:true});this.dir=dir;this.port=port;this.host=host;this.publicUrl=publicUrl;this.logging=log;this.name=name;this.pluginsEnabled=pluginsEnabled;this.pluginDirectory=pluginDirectory;
     this.store=new Store(join(dir,'worlds.sqlite'));this.identity=loadIdentity(dir);
     this.connections=new Set();this.tickets=new Map();this.transfers=new Map();this.builds=new Map();
