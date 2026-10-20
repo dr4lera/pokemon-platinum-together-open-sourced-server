@@ -16,6 +16,7 @@ import {Control} from './control.mjs';
 import {Accounts} from './accounts.mjs';
 import {Mail} from './mail.mjs';
 import {Relay} from './relay.mjs';
+import {CommunityLink} from './community-link.mjs';
 import {CustomGifts} from './custom-gifts.mjs';
 import {Moderation} from './moderation.mjs';
 import {Plugins} from './plugins.mjs';
@@ -30,13 +31,14 @@ const hash=v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)?v:fail('bad_hash');
 const ticketHash=v=>sha(b64(v,32,32)).toString('hex');
 
 export class Hub {
-  constructor({dir,port=8787,host='127.0.0.1',publicUrl,log=true,name='Platinum Private Worlds',role='combined',trustedLoopbackProxy,pluginsEnabled=true,pluginDirectory,friendCodesEnabled=false}={}) {
+  constructor({dir,port=8787,host='127.0.0.1',publicUrl,log=true,name='Platinum Private Worlds',role='combined',trustedLoopbackProxy,pluginsEnabled=true,pluginDirectory,friendCodesEnabled=false,communityLinkEnabled=false}={}) {
     if(!dir)throw new Error('A data directory is required');
     if(!['combined','inverna','world'].includes(role))throw new Error('Invalid server role');
     // Ordinary 0.1.5 clients can enter relay co-op through Menu > Party >
     // Join World. Persistent world and Inverna deployments remain separate.
     if(typeof friendCodesEnabled!=='boolean')throw new Error('friendCodesEnabled must be boolean');
-    this.role=role;this.features={...FEATURES,city:role!=='world',realms:role!=='inverna',player_worlds:role==='combined',friend_codes:friendCodesEnabled&&role!=='world'};
+    if(typeof communityLinkEnabled!=='boolean')throw new Error('communityLinkEnabled must be boolean');
+    this.role=role;this.features={...FEATURES,city:role!=='world',realms:role!=='inverna',player_worlds:role==='combined',friend_codes:friendCodesEnabled&&role!=='world',community_link:communityLinkEnabled&&role==='combined'};
     mkdirSync(dir,{recursive:true});this.dir=dir;this.port=port;this.host=host;this.publicUrl=publicUrl;this.logging=log;this.name=name;this.pluginsEnabled=pluginsEnabled;this.pluginDirectory=pluginDirectory;
     this.store=new Store(join(dir,'worlds.sqlite'));this.identity=loadIdentity(dir);
     this.trainerArt=new TrainerArt(this);
@@ -54,6 +56,7 @@ export class Hub {
     this.mail=new Mail(this);
     this.customGifts=new CustomGifts(this);
     this.relay=new Relay(this);
+    this.communityLink=new CommunityLink(this);
     this.http=createServer((req,res)=>this.request(req,res));
     this.ws=new WebSocketServer({noServer:true,maxPayload:16384,perMessageDeflate:false});
     this.http.on('upgrade',(req,socket,head)=>{
@@ -61,8 +64,8 @@ export class Hub {
       let clientAddress;try{clientAddress=this.moderation.address(req);}catch{socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');return;}
       if(this.moderation.blockedIp(clientAddress)){socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');return;}
       // Paths are explicit; native client's exact lobby suffix remains under verification.
-      if(!['/','/lobby','/lobby/ws','/ws','/realm','/realm/ws','/relay'].includes(path)){socket.end('HTTP/1.1 404 Not Found\r\n\r\n');return;}
-      this.ws.handleUpgrade(req,socket,head,ws=>this.connected(ws,path==='/relay'?'relay':path.startsWith('/realm')?'realm':'lobby',clientAddress));
+      if(!['/','/lobby','/lobby/ws','/ws','/realm','/realm/ws','/relay','/community-link'].includes(path)||(path==='/community-link'&&!this.features.community_link)){socket.end('HTTP/1.1 404 Not Found\r\n\r\n');return;}
+      this.ws.handleUpgrade(req,socket,head,ws=>this.connected(ws,path==='/community-link'?'community-link':path==='/relay'?'relay':path.startsWith('/realm')?'realm':'lobby',clientAddress));
     });
   }
   log(event,details={}) {
@@ -73,7 +76,7 @@ export class Hub {
   async start(){await this.plugins.start();await new Promise((resolve,reject)=>{this.http.once('error',reject);this.http.listen(this.port,this.host,resolve);});this.port=this.http.address().port;this.url=this.publicUrl??`http://127.0.0.1:${this.port}`;this.log('started',{port:this.port});this.plugins.emit('server.started',{url:this.url});this.timer=setInterval(()=>this.sweep(),1000);this.timer.unref();return this;}
   close(){this.closePromise??=this.shutdown();return this.closePromise;}
   async shutdown(){clearInterval(this.timer);await this.plugins.close();for(const c of this.connections)c.ws.terminate();await new Promise(resolve=>this.ws.close(resolve));await new Promise(resolve=>this.http.close(resolve));this.store.close();}
-  sweep(){this.relay.sweep();this.social.sweep();const now=Date.now();for(const [k,v] of this.tickets)if(v.expires<now)this.tickets.delete(k);for(const [k,v] of this.transfers)if(v.expires<now)this.transfers.delete(k);for(const c of this.connections){if(c.expires<now||now-c.activity>90000)c.ws.close(1008,'expired');}}
+  sweep(){this.relay.sweep();this.communityLink.sweep();this.social.sweep();const now=Date.now();for(const [k,v] of this.tickets)if(v.expires<now)this.tickets.delete(k);for(const [k,v] of this.transfers)if(v.expires<now)this.transfers.delete(k);for(const c of this.connections){if(c.expires<now||now-c.activity>90000)c.ws.close(1008,'expired');}}
   credentials(player,refresh=true){const p=this.store.player(player);const r={...issueToken(this.identity,player,p.key),display_name:p.name,features:this.features};if(refresh){r.refresh_token=secret();this.store.db.prepare('INSERT INTO refresh(hash,player,expires) VALUES(?,?,?)').run(sha(r.refresh_token).toString('hex'),player,Date.now()+30*86400000);}return r;}
   enroll(name,key){const p=this.store.enroll(name,key);return this.credentials(String(p.id));}
   async request(req,res){
@@ -135,16 +138,16 @@ export class Hub {
   connected(ws,kind,ip='127.0.0.1'){
     const c={id:randomUUID(),kind,ws,ip,activity:Date.now(),expires:Date.now()+15000,authenticated:false,phase:'hello',traffic:new TrafficWindow(240,LIMITS.game_burst_bytes)};this.connections.add(c);
     ws.on('error',()=>{});
-    ws.on('close',()=>{this.connections.delete(c);if(c.kind==='relay')this.relay.disconnected(c);if(c.authenticated&&c.kind==='lobby')this.social.disconnected(c);if(c.realm){for(const [k,t]of this.transfers)if(t.connection===c.id)this.transfers.delete(k);this.roster(c.realm);}this.log('disconnected',{connection:c.id,kind,player:c.player});if(c.authenticated)this.plugins.emit('player.disconnected',{player:c.player});});
+    ws.on('close',()=>{this.connections.delete(c);this.communityLink.disconnected(c);if(c.kind==='relay')this.relay.disconnected(c);if(c.authenticated&&c.kind==='lobby')this.social.disconnected(c);if(c.realm){for(const [k,t]of this.transfers)if(t.connection===c.id)this.transfers.delete(k);this.roster(c.realm);}this.log('disconnected',{connection:c.id,kind,player:c.player});if(c.authenticated)this.plugins.emit('player.disconnected',{player:c.player});});
     ws.on('message',(data,binary)=>{
       try{
         c.activity=Date.now();if(!c.traffic.allow(data.length))fail('rate_limit');
         if(c.authenticated)this.store.player(c.player);
-        if(binary){if(c.kind==='relay')this.relay.binary(c,data);else this.binary(c,data);return;}
+        if(binary){if(c.kind==='community-link')this.communityLink.binary(c,data);else if(c.kind==='relay')this.relay.binary(c,data);else this.binary(c,data);return;}
         const m=JSON.parse(data.toString());if(!m||Array.isArray(m)||typeof m.t!=='string')fail('bad_message');
         this.log('message',{connection:c.id,kind,type:m.t,player:c.player,realm:c.realm});
-        if(c.kind==='relay'){if(!c.authenticated)this.relay.authenticate(c,m);else this.relay.message(c,m);}else if(!c.authenticated)this.authenticate(c,m);else if(c.kind==='lobby')this.lobby(c,m);else this.realm(c,m);
-      }catch(e){this.log('rejected',{connection:c.id,code:e.code??'bad_message'});this.send(c,{t:'err',code:e.code??'bad_message',fatal:!c.authenticated});if(!c.authenticated)c.ws.close(1008,'authentication failed');}
+        if(c.kind==='community-link'){if(!c.authenticated)this.communityLink.authenticate(c,m);else this.communityLink.message(c,m);}else if(c.kind==='relay'){if(!c.authenticated)this.relay.authenticate(c,m);else this.relay.message(c,m);}else if(!c.authenticated)this.authenticate(c,m);else if(c.kind==='lobby'){this.lobby(c,m);this.communityLink.reconcile();}else this.realm(c,m);
+      }catch(e){this.log('rejected',{connection:c.id,code:e.code??'bad_message'});if(c.kind==='community-link')this.communityLink.rejected(c,e);else{this.send(c,{t:'err',code:e.code??'bad_message',fatal:!c.authenticated});if(!c.authenticated)c.ws.close(1008,'authentication failed');}}
     });
   }
   send(c,m){if(c.ws.readyState===1){if(c.ws.bufferedAmount>2097152){c.ws.close(1008,'slow consumer');return;}c.ws.send(JSON.stringify(m));}}
@@ -174,6 +177,7 @@ export class Hub {
   clients(id){return [...this.connections].filter(c=>c.kind==='realm'&&c.authenticated&&c.realm===id&&c.ws.readyState===1&&c.seat!==undefined);}
   descriptor(r,player){const id=String(r.id);return {realm:id,name:r.name,owner:String(r.owner),yours:String(r.owner)===player,status:'open',ready:r.setup!==null,created_at_ms:r.created,members:this.store.members(id),inside:this.clients(id).map(c=>({player:c.player,seat:c.seat}))};}
   lobby(c,m){
+    if(this.communityLink.lobby(c,m))return;
     if(this.role==='inverna'&&(m.t.startsWith('realm.')||m.t.startsWith('party.world.')))fail('world_server_required');
     if(this.role==='world'&&m.t.startsWith('city.'))fail('inverna_server_required');
     if(m.t==='private.worlds.list'){this.send(c,{t:'private.worlds',worlds:this.store.joinedWorlds(c.player)});return;}
