@@ -26,9 +26,9 @@ class Client {
   next(type){const i=this.messages.findIndex(m=>m.t===type);if(i>=0)return Promise.resolve(this.messages.splice(i,1)[0]);return new Promise((resolve,reject)=>{const w={type,resolve,timer:setTimeout(()=>{this.waiters=this.waiters.filter(x=>x!==w);reject(new Error(`Timed out waiting for ${type}: ${JSON.stringify(this.messages)}`));},3000)};this.waiters.push(w);});}
   close(){this.ws.close();}
 }
-async function connect(hub,profile,ticket){
+async function connect(hub,profile,ticket,build='test-015'){
   const c=await new Client(hub.url.replace('http:','ws:')+(ticket?'/realm':'/lobby')).open();
-  c.send(ticket?{t:'hello',pt:1,ticket:ticket.ticket,build:'test-015'}:{t:'lobby.hello',pt:2,token:profile.token,build:'test-015'});
+  c.send(ticket?{t:'hello',pt:1,ticket:ticket.ticket,build}:{t:'lobby.hello',pt:2,token:profile.token,build});
   const challenge=await c.next('challenge');const tail=ticket?b64(ticket.ticket,32,32):sha(readToken(hub.identity,profile.token).bytes);
   c.send({t:'auth',sig:sign(null,proofBytes(ticket?'PT-REALM':'PT2-LOBBY',b64(challenge.nonce,32,32),tail),privateKey(b64(profile.seed,32,32))).toString('base64')});
   c.ready=await c.next(ticket?'ready':'lobby.ready');return c;
@@ -76,20 +76,34 @@ test('custom Pokemon, egg and item gifts require the recipient key and acknowled
  }finally{await hub.close();rmSync(dir,{recursive:true,force:true});}
 });
 
-test('native relay allocation, nonce proof, ticket replay refusal and authenticated binary routing',async()=>{
+for(const build of ['test-015','b113ab54d7b0e9a690c51e87'])test(`native relay ${build}: ready contract, nonce proof, replay refusal and routing`,async()=>{
   const dir=mkdtempSync(join(tmpdir(),'pt-relay-')),hub=new Hub({dir,port:0,log:false}),clients=[];
   try{
     await hub.start();const profiles=['RelayHost','RelayGuest','Outside'].map(name=>{const key=newClient();const p={...key,...hub.enroll(name,key.key)};hub.store.putTrainer(p.player_id,{name:name.slice(0,10),look:0,outfit:0,tutorial_done:true,revision:0});return p;});
-    for(const p of profiles)clients.push(await connect(hub,p));
+    for(const p of profiles)clients.push(await connect(hub,p,undefined,build));
     assert.equal(clients[0].ready.features.player_worlds,true,'combined backend exposes the verified manual relay join path');
     clients[0].send({t:'party.invite',player:profiles[1].player_id});const invite=await clients[1].next('party.invited');await clients[0].next('party.invite.sent');clients[1].send({t:'party.join',party:invite.party});await clients[1].next('party');
     clients[2].send({t:'party.world.join',request_id:randomUUID()});assert.equal((await clients[2].next('err')).code,'party_required');
     clients[0].send({t:'party.world.join',request_id:randomUUID()});const host=await clients[0].next('party.world'),guest=await clients[1].next('party.world');assert.equal(host.session,guest.session);assert.equal(host.seat,0);assert.equal(guest.seat,1);assert.equal(host.asked_by,null);assert.equal(guest.asked_by,null);
-    async function join(p,t){const c=await new Client(hub.url.replace('http:','ws:')+'/relay').open();clients.push(c);c.send({t:'hello',pt:1,ticket:t.ticket,build:'test-015'});const challenge=await c.next('challenge');c.send({t:'auth',sig:sign(null,b64(challenge.nonce,32,32),privateKey(b64(p.seed,32,32))).toString('base64')});await c.next('ready');return c;}
-    const a=await join(profiles[0],host),b=await join(profiles[1],guest);
+    async function join(p,t){
+      const c=await new Client(hub.url.replace('http:','ws:')+'/relay').open();clients.push(c);
+      c.send({t:'hello',pt:1,ticket:t.ticket,build});const challenge=await c.next('challenge');
+      c.send({t:'auth',sig:sign(null,b64(challenge.nonce,32,32),privateKey(b64(p.seed,32,32))).toString('base64')});
+      const ready=await c.next('ready');
+      assert.equal(ready.world,t.world);assert.equal(ready.session,t.session);assert.equal(ready.seat,t.seat);
+      assert.ok(Number.isSafeInteger(ready.epoch)&&ready.epoch>=0);
+      assert.ok(Array.isArray(ready.roster)&&ready.roster.some(r=>r.seat===t.seat&&r.player_id===p.player_id));
+      const bounds={game_frames_per_second:[1,1000],game_bytes_per_second:[1024,491640],game_burst_bytes:[1024,491640]};
+      for(const [key,[min,max]] of Object.entries(bounds))assert.ok(Number.isInteger(ready.limits[key])&&ready.limits[key]>=min&&ready.limits[key]<=max,`native 0.1.7 rejects ready limit ${key}`);
+      return c;
+    }
+    const a=await join(profiles[0],host);
+    const mismatch=await new Client(hub.url.replace('http:','ws:')+'/relay').open();clients.push(mismatch);
+    mismatch.send({t:'hello',pt:1,ticket:guest.ticket,build:'incompatible-build'});assert.equal((await mismatch.next('err')).code,'version');
+    const b=await join(profiles[1],guest);
     a.ws.send(Buffer.from([1,255,7,8,9]));assert.deepEqual((await b.next('binary')).data,Buffer.from([1,0,7,8,9]));
     b.ws.send(Buffer.from([1,0,10,11]));assert.deepEqual((await a.next('binary')).data,Buffer.from([1,1,10,11]));
-    const replay=await new Client(hub.url.replace('http:','ws:')+'/relay').open();clients.push(replay);replay.send({t:'hello',pt:1,ticket:host.ticket,build:'test-015'});assert.equal((await replay.next('err')).code,'bad_ticket');
+    const replay=await new Client(hub.url.replace('http:','ws:')+'/relay').open();clients.push(replay);replay.send({t:'hello',pt:1,ticket:host.ticket,build});assert.equal((await replay.next('err')).code,'bad_ticket');
     b.ws.send(Buffer.from([1,9,1]));assert.equal((await b.next('err')).code,'bad_game_frame');
     clients[1].send({t:'party.leave'});await clients[1].next('party');assert.equal([...hub.relay.sessions.values()][0].players[1],null);
   }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}

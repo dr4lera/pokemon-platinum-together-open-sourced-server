@@ -17,7 +17,7 @@
   },
   {
     "path": "README.md",
-    "sha256": "93dc68f03ec4afe4ad6093c0f18e4191baf68cc45c4df80e8bceee69ddeae477"
+    "sha256": "5da5a97beb0e8d10f92f4c1dc48068d4f2ab622150631c7ac869ce95a5738672"
   },
   {
     "path": "THIRD_PARTY_NOTICES.md",
@@ -117,7 +117,7 @@
   },
   {
     "path": "package.json",
-    "sha256": "d20c651766915f90e1d6b527c9164e82571545e296e935ecd5c49fe2429b8e96"
+    "sha256": "363512c13be471924e9cf10e7f67d39b8cf2f70456dd5ab07d8ca0dcf89314c6"
   },
   {
     "path": "plugin-worker.mjs",
@@ -149,7 +149,7 @@
   },
   {
     "path": "test/backend.test.mjs",
-    "sha256": "5e53c73fd50d4f6107676cc2047aad33638189d7deec2cbaddbfeaccd5e8578c"
+    "sha256": "b5c2cb0368502f482ae6a9f759218100ddcbfae21a71938cbac228cc85147da9"
   },
   {
     "path": "test/config.test.mjs",

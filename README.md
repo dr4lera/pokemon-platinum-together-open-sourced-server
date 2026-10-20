@@ -6,16 +6,16 @@ official backend code are not included. Native unattended simulation is unfinish
 
 ## Download
 
-**[Download the shared server / relay source — dev9 preview](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/download/v0.1.0-dev.9/PokemonPlatinumTogetherOpenSourced-Server-dev9.zip)**
+**[Download the shared server / relay source â€” dev11 preview](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/download/v0.1.0-dev.11/PokemonPlatinumTogetherOpenSourced-Server-dev11.zip)**
 
 Extract the ZIP, install Node.js 24.12 or newer, and follow [Setup and tests](#setup-and-tests)
 and the [complete hosting guide](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher/blob/main/PrivateServer/docs/server-hosting.md).
 The package includes vendored dependencies, config examples and tests. Enroll the
 owner locally before exposing the listener. Keep generated account/data files private.
 
-[Release notes and SHA-256 checksum](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/tag/v0.1.0-dev.9).
+[Release notes and SHA-256 checksum](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/tag/v0.1.0-dev.11).
 [All five projects and downloads](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher#downloads).
-The public dev9 build is the **Latest release** and remains a **development preview**.
+The public dev11 build is the **Latest release** and remains a **development preview**.
 For Windows apps and bundled runtimes, use the [full Windows bundle](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher#downloads).
 
 ## Related projects
@@ -88,10 +88,20 @@ gameplay has loaded successfully; that remains a separate release check.
 
 The combined role advertises `player_worlds` for the tested manual relay path.
 The Inverna and persistent-world roles keep that capability disabled.
-The host uses **Host my world → Use Relay**. The guest first loads a local world,
-joins the host's code through Friends, then selects **Menu → Party → Join World**.
+The host uses **Host my world â†’ Use Relay**. The guest first loads a local world,
+joins the host's code through Friends, then selects **Menu â†’ Party â†’ Join World**.
 Two unmodified local clients completed this sequence and repeated it after backend
 restart. Party membership alone does not create the native pending world request;
 never invent an unsolicited guest allocation to skip that check.
 Automatic shortcut handoff, remote gameplay, Soul Link startup, cross-map
 independence and unattended simulation remain incomplete.
+
+
+## Dev11 interoperability checks
+
+All 28 backend tests pass locally with the bundled Node 24 runtime. Relay tests
+authenticate and route both an older fixture build and the official 0.1.7 gameplay
+release ID. They check world/session/seat/epoch/roster fields, native ready limits,
+wrong-build refusal without consuming a valid ticket, replay rejection and binary
+forwarding. These are protocol tests, not an ordinary two-player 0.1.7 gameplay
+pass. See the launcher status page for remaining native acceptance checks.
