@@ -4,6 +4,20 @@ Compatible private accounts, unique usernames, friends, parties, relay routing,
 chat, owner-signed mail and SQLite world/save storage. Original game assets and
 official backend code are not included. Native unattended simulation is unfinished.
 
+## Download
+
+**[Download the shared server / relay source — dev9 preview](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/download/v0.1.0-dev.9/PokemonPlatinumTogetherOpenSourced-Server-dev9.zip)**
+
+Extract the ZIP, install Node.js 24.12 or newer, and follow [Setup and tests](#setup-and-tests)
+and the [complete hosting guide](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher/blob/main/PrivateServer/docs/server-hosting.md).
+The package includes vendored dependencies, config examples and tests. Enroll the
+owner locally before exposing the listener. Keep generated account/data files private.
+
+[Release notes and SHA-256 checksum](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/tag/v0.1.0-dev.9).
+[All five projects and downloads](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher#downloads).
+The public dev9 build is the **Latest release** and remains a **development preview**.
+For Windows apps and bundled runtimes, use the [full Windows bundle](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher#downloads).
+
 ## Related projects
 
 - [Launcher, mail app and full documentation](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher)
