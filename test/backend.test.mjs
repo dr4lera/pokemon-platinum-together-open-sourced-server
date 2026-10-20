@@ -1,0 +1,222 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync,readFileSync,writeFileSync,unlinkSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {randomUUID,sign,randomBytes,generateKeyPairSync} from 'node:crypto';
+import {mailProof} from '../mail.mjs';
+import {inboxClient} from '../inbox-client.mjs';
+import {WebSocket} from '../vendor/ws/wrapper.mjs';
+import {Hub} from '../hub.mjs';
+import {newClient,privateKey,proofBytes,readToken,sha,b64} from '../identity.mjs';
+import {refreshProof} from '../refresh.mjs';
+import {controlBytes} from '../control.mjs';
+import {accountBytes} from '../accounts.mjs';
+import {accountClient} from '../account-client.mjs';
+
+class Client {
+  constructor(url){this.ws=new WebSocket(url);this.messages=[];this.waiters=[];this.ws.on('message',(b,binary)=>{const m=binary?{t:'binary',data:Buffer.from(b)}:JSON.parse(b);const i=this.waiters.findIndex(w=>w.type===m.t);if(i>=0){const [w]=this.waiters.splice(i,1);clearTimeout(w.timer);w.resolve(m);}else this.messages.push(m);});}
+  async open(){await new Promise((resolve,reject)=>{this.ws.once('open',resolve);this.ws.once('error',reject);});return this;}
+  send(m){this.ws.send(JSON.stringify(m));}
+  next(type){const i=this.messages.findIndex(m=>m.t===type);if(i>=0)return Promise.resolve(this.messages.splice(i,1)[0]);return new Promise((resolve,reject)=>{const w={type,resolve,timer:setTimeout(()=>{this.waiters=this.waiters.filter(x=>x!==w);reject(new Error(`Timed out waiting for ${type}: ${JSON.stringify(this.messages)}`));},3000)};this.waiters.push(w);});}
+  close(){this.ws.close();}
+}
+async function connect(hub,profile,ticket){
+  const c=await new Client(hub.url.replace('http:','ws:')+(ticket?'/realm':'/lobby')).open();
+  c.send(ticket?{t:'hello',pt:1,ticket:ticket.ticket,build:'test-015'}:{t:'lobby.hello',pt:2,token:profile.token,build:'test-015'});
+  const challenge=await c.next('challenge');const tail=ticket?b64(ticket.ticket,32,32):sha(readToken(hub.identity,profile.token).bytes);
+  c.send({t:'auth',sig:sign(null,proofBytes(ticket?'PT-REALM':'PT2-LOBBY',b64(challenge.nonce,32,32),tail),privateKey(b64(profile.seed,32,32))).toString('base64')});
+  c.ready=await c.next(ticket?'ready':'lobby.ready');return c;
+}
+async function ticket(c,realm){c.send({t:'realm.enter',realm});return c.next('realm.ticket');}
+
+test('custom Pokemon, egg and item gifts require the recipient key and acknowledge a bound delivery once',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-mart-'));let hub=new Hub({dir,port:0,log:false});
+ try{
+  await hub.start();const a=newClient(),b=newClient(),p={...a,...hub.enroll('EggOwner',a.key)},q={...b,...hub.enroll('EggOther',b.key)},path=join(dir,'profile.json');
+  writeFileSync(path,JSON.stringify({...p,hub:hub.url,hub_key:hub.identity.pin}));const pgt=Buffer.alloc(260);pgt.writeUInt16LE(3);pgt.writeUInt32LE(467,4);const draft={op:randomUUID(),to:['EggOwner'],title:'Custom gift',body:'Collect from the deliveryman.',attachments:[{kind:'pgt',data:pgt.toString('base64')}]};hub.mail.publish(draft);
+  const gifts=(await inboxClient({profile:path,action:'list'})).gifts;assert.equal(gifts.length,1);assert.equal(Buffer.from(gifts[0].data,'base64').readUInt32LE(4),467);assert.equal(hub.mail.list(p.player_id)[0].attachments.length,0);
+  const stolen=join(dir,'stolen.json');writeFileSync(stolen,JSON.stringify({...p,seed:b.seed,hub:hub.url,hub_key:hub.identity.pin}));await assert.rejects(()=>inboxClient({profile:stolen,action:'list'}),/bad_proof/);
+  const id=gifts[0].id,client='a'.repeat(64);await assert.rejects(()=>inboxClient({profile:path,action:'ack',id,client}),/gift_not_prepared/);
+  const ready=await inboxClient({profile:path,action:'prepare',id,client});assert.equal(ready.data,pgt.toString('base64'));await assert.rejects(()=>inboxClient({profile:path,action:'prepare',id,client:'b'.repeat(64)}),/gift_reserved/);
+  await hub.close();hub=new Hub({dir,port:0,log:false});await hub.start();writeFileSync(path,JSON.stringify({...p,hub:hub.url,hub_key:hub.identity.pin}));assert.equal((await inboxClient({profile:path,action:'prepare',id,client})).data,pgt.toString('base64'));
+  assert.equal((await inboxClient({profile:path,action:'ack',id,client})).acknowledged,true);assert.equal((await inboxClient({profile:path,action:'ack',id,client})).acknowledged,true);assert.equal((await inboxClient({profile:path,action:'list'})).gifts.length,0);
+ }finally{await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('native relay allocation, nonce proof, ticket replay refusal and authenticated binary routing',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-relay-')),hub=new Hub({dir,port:0,log:false}),clients=[];
+  try{
+    await hub.start();const profiles=['RelayHost','RelayGuest','Outside'].map(name=>{const key=newClient();const p={...key,...hub.enroll(name,key.key)};hub.store.putTrainer(p.player_id,{name:name.slice(0,10),look:0,outfit:0,tutorial_done:true,revision:0});return p;});
+    for(const p of profiles)clients.push(await connect(hub,p));
+    clients[0].send({t:'party.invite',player:profiles[1].player_id});const invite=await clients[1].next('party.invited');await clients[0].next('party.invite.sent');clients[1].send({t:'party.join',party:invite.party});await clients[1].next('party');
+    clients[2].send({t:'party.world.join',request_id:randomUUID()});assert.equal((await clients[2].next('err')).code,'party_required');
+    clients[0].send({t:'party.world.join',request_id:randomUUID()});const host=await clients[0].next('party.world'),guest=await clients[1].next('party.world');assert.equal(host.session,guest.session);assert.equal(host.seat,0);assert.equal(guest.seat,1);
+    async function join(p,t){const c=await new Client(hub.url.replace('http:','ws:')+'/relay').open();clients.push(c);c.send({t:'hello',pt:1,ticket:t.ticket,build:'test-015'});const challenge=await c.next('challenge');c.send({t:'auth',sig:sign(null,b64(challenge.nonce,32,32),privateKey(b64(p.seed,32,32))).toString('base64')});await c.next('ready');return c;}
+    const a=await join(profiles[0],host),b=await join(profiles[1],guest);
+    a.ws.send(Buffer.from([1,255,7,8,9]));assert.deepEqual((await b.next('binary')).data,Buffer.from([1,0,7,8,9]));
+    b.ws.send(Buffer.from([1,0,10,11]));assert.deepEqual((await a.next('binary')).data,Buffer.from([1,1,10,11]));
+    const replay=await new Client(hub.url.replace('http:','ws:')+'/relay').open();clients.push(replay);replay.send({t:'hello',pt:1,ticket:host.ticket,build:'test-015'});assert.equal((await replay.next('err')).code,'bad_ticket');
+    b.ws.send(Buffer.from([1,9,1]));assert.equal((await b.next('err')).code,'bad_game_frame');
+    clients[1].send({t:'party.leave'});await clients[1].next('party');assert.equal([...hub.relay.sessions.values()][0].players[1],null);
+  }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('owner-key mail publication, recipient isolation, idempotency and durable claim recovery',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-mail-'));let hub=new Hub({dir,port:0,log:false});const clients=[];
+  try{
+    await hub.start();const a=newClient(),b=newClient(),p={...a,...hub.enroll('MailOwner',a.key)},q={...b,...hub.enroll('MailFriend',b.key)};
+    const sender=generateKeyPairSync('rsa',{modulusLength:3072});writeFileSync(join(dir,'mail-sender-public.pem'),sender.publicKey.export({type:'spki',format:'pem'}));
+    const request=async(data,key=sender.privateKey)=>{const challenge=await fetch(hub.url+'/private/mail/challenge').then(r=>r.json());const encoded=Buffer.from(JSON.stringify(data)).toString('base64');const m={...challenge,data:encoded,sig:sign('sha256',mailProof(challenge.nonce,challenge.server_ms,encoded),key).toString('base64')};const response=await fetch(hub.url+'/private/mail',{method:'POST',body:JSON.stringify(m)});return {response,body:await response.json(),m};};
+    const draft={action:'send',op:randomUUID(),to:['MailFriend'],title:'Welcome',body:'A private gift.',attachments:[{kind:'item',item:'poke-ball',count:5}]};
+    assert.throws(()=>hub.mail.challenge({socket:{remoteAddress:'192.0.2.1'}}),e=>e.code==='local_control_only');
+    const wrong=generateKeyPairSync('rsa',{modulusLength:2048});assert.equal((await request(draft,wrong.privateKey)).body.error,'bad_mail_proof');
+    const sent=await request(draft);assert.equal(sent.body.delivered,1);assert.equal((await fetch(hub.url+'/private/mail',{method:'POST',body:JSON.stringify(sent.m)})).status,400);
+    assert.equal((await request(draft)).body.delivered,1);assert.equal((await request({...draft,title:'Changed'})).body.error,'mail_op_conflict');
+    assert.equal((await request({...draft,op:randomUUID(),to:['MailFriend','Missing']})).body.error,'recipient_not_found');assert.equal(hub.mail.list(q.player_id).length,1);
+    const owner=await connect(hub,p),friend=await connect(hub,q);clients.push(owner,friend);owner.send({t:'mail.list'});assert.equal((await owner.next('mail.letters')).letters.length,0);
+    friend.send({t:'mail.list'});const letter=(await friend.next('mail.letters')).letters[0],grant=letter.attachments[0].grant;
+    owner.send({t:'mail.prepare',grant,box:'box-a'});assert.equal((await owner.next('mail.refused')).code,'not_found');
+    friend.send({t:'mail.ack',grant,box:'box-a'});assert.equal((await friend.next('mail.refused')).code,'not_prepared');
+    friend.send({t:'mail.prepare',grant,box:'box-a'});assert.equal((await friend.next('mail.prepared')).payload.count,5);
+    for(const c of clients)c.ws.terminate();clients.length=0;await hub.close();hub=new Hub({dir,port:0,log:false});await hub.start();
+    const recovered=await connect(hub,q);clients.push(recovered);recovered.send({t:'mail.prepare',grant,box:'box-b'});assert.equal((await recovered.next('mail.refused')).code,'reserved');
+    recovered.send({t:'mail.prepare',grant,box:'box-a'});assert.equal((await recovered.next('mail.prepared')).payload.count,5);
+    for(let i=0;i<2;i++){recovered.send({t:'mail.ack',grant,box:'box-a'});assert.equal((await recovered.next('mail.acked')).grant,grant);}
+    recovered.send({t:'mail.prepare',grant,box:'box-a'});assert.equal((await recovered.next('mail.refused')).code,'acknowledged');
+    recovered.send({t:'mail.read',letter:letter.letter});assert.equal((await recovered.next('mail.letters')).letters[0].read,true);
+  }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+test('real HTTP/WebSocket auth, membership, chunk integrity and persistence across backend restart',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-private-'));let hub=new Hub({dir,port:0,log:false});let clients=[];
+  try{
+    await hub.start();const own=newClient(),friend=newClient(),stranger=newClient();const p={...own,...hub.enroll('Owner',own.key)},f={...friend,...hub.enroll('Friend',friend.key)},s={...stranger,...hub.enroll('Stranger',stranger.key)};
+    const health=await fetch(hub.url+'/health').then(r=>r.json());assert.equal(health.dedicated_simulation,false);
+    const a=await connect(hub,p);clients.push(a);a.send({t:'realm.create',name:'Test World'});const realm=(await a.next('realm')).realm.realm;
+    a.send({t:'realm.invite',realm,player:f.player_id});await a.next('realm');
+    const outside=await connect(hub,s);clients.push(outside);outside.send({t:'realm.enter',realm});assert.equal((await outside.next('err')).code,'not_a_member');
+    const r=await connect(hub,p,await ticket(a,realm));clients.push(r);assert.equal(r.ready.seat,0);assert.equal(r.ready.save,null);
+    r.send({t:'world.publish',setup:Buffer.from('test setup').toString('base64'),story:[[1,12]],rival:null});assert.deepEqual((await r.next('world')).story.values,[[1,12]]);
+    const data=randomBytes(10123),hash=sha(data).toString('hex'),op=randomUUID();
+    r.send({t:'save.begin',op,counter:1,size:data.length,hash});assert.equal((await r.next('save.go')).chunk,4096);
+    for(let i=0;i<3;i++)r.send({t:'save.chunk',op,index:i,data:data.subarray(i*4096,(i+1)*4096).toString('base64')});
+    r.send({t:'save.commit',op});assert.equal((await r.next('save.ack')).hash,hash);
+    const bad=randomUUID();r.send({t:'save.begin',op:bad,counter:2,size:4,hash:'0'.repeat(64)});await r.next('save.go');r.send({t:'save.chunk',op:bad,index:0,data:'dGVzdA=='});r.send({t:'save.commit',op:bad});assert.equal((await r.next('err')).code,'bad_save_hash');assert.equal(hub.store.latest(realm).counter,1);
+    const pin=hub.identity.pin;for(const c of clients)c.close();clients=[];await hub.close();
+    hub=new Hub({dir,port:0,log:false});await hub.start();assert.equal(hub.identity.pin,pin);
+    const b=await connect(hub,f);clients.push(b);const rejoined=await connect(hub,f,await ticket(b,realm));clients.push(rejoined);assert.equal(rejoined.ready.seat,1);assert.equal(rejoined.ready.save.hash,hash);assert.deepEqual(rejoined.ready.story.values,[[1,12]]);
+    rejoined.send({t:'save.get'});const pieces=[];for(let i=0;i<3;i++)pieces.push(Buffer.from((await rejoined.next('save.data')).data,'base64'));const end=await rejoined.next('save.end');assert.equal(end.hash,hash);assert.deepEqual(Buffer.concat(pieces),data);
+    rejoined.send({t:'invented.success'});assert.equal((await rejoined.next('err')).code,'unsupported_message');
+  }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+test('token forgery, expiry, malformed base64 and unauthenticated commands are rejected',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-private-'));const hub=new Hub({dir,port:0,log:false});let c;
+  try{
+    await hub.start();const identity=newClient(),p=hub.enroll('Tester',identity.key),t=readToken(hub.identity,p.token);
+    assert.equal(t.player,p.player_id);assert.throws(()=>readToken(hub.identity,p.token,Date.now()+3600001));
+    const envelope=JSON.parse(Buffer.from(p.token,'base64'));const raw=Buffer.from(envelope.bytes,'base64');raw[2]^=1;envelope.bytes=raw.toString('base64');assert.throws(()=>readToken(hub.identity,Buffer.from(JSON.stringify(envelope)).toString('base64')));
+    c=await new Client(hub.url.replace('http:','ws:')+'/lobby').open();c.send({t:'realm.create',name:'No auth'});assert.equal((await c.next('err')).code,'version');assert.equal(hub.store.db.prepare('SELECT COUNT(*) n FROM realms').get().n,0);
+  }finally{c?.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('native-shaped city presence, targeted invites, consent, capacity and party leadership',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-social-'));const hub=new Hub({dir,port:0,log:false});const clients=[];
+  try{
+    await hub.start();const identities=Array.from({length:5},()=>newClient());const profiles=identities.map((i,n)=>({...i,...hub.enroll('Trainer'+n,i.key)}));
+    for(let n=0;n<5;n++){const c=await connect(hub,profiles[n]);clients.push(c);c.send({t:'trainer.put',name:'Trainer'+n,look:0,outfit:0,tutorial_done:true,revision:0});assert.equal((await c.next('trainer')).applied,true);}
+    clients[0].send({t:'city.enter',district:'plaza'});assert.equal((await clients[0].next('city.joined')).players.length,0);
+    clients[1].send({t:'city.enter',district:'plaza'});const city=await clients[1].next('city.joined');assert.equal(city.players[0].player,profiles[0].player_id);assert.equal((await clients[0].next('city.add')).player,profiles[1].player_id);
+    // A forged slot must be replaced with the authenticated sender's slot.
+    clients[1].ws.send(Buffer.from([2,63,3,10,20,30]));assert.deepEqual((await clients[0].next('binary')).data,Buffer.from([2,1,city.slot,3,10,20,30]));
+    clients[1].ws.send(Buffer.from([2,0,32,10]));assert.equal((await clients[1].next('err')).code,'bad_city_frame');
+    clients[0].send({t:'party.invite',player:profiles[1].player_id});const invite=await clients[1].next('party.invited');await clients[0].next('party.invite.sent');
+    clients[2].send({t:'party.join',party:invite.party});assert.equal((await clients[2].next('err')).code,'invite_expired');
+    clients[1].send({t:'party.join',party:invite.party});assert.equal((await clients[1].next('party')).party.members.length,2);
+    clients[1].send({t:'party.invite',player:profiles[2].player_id});assert.equal((await clients[1].next('err')).code,'not_leader');
+    for(let n=2;n<4;n++){clients[0].send({t:'party.invite',player:profiles[n].player_id});const i=await clients[n].next('party.invited');await clients[0].next('party.invite.sent');clients[n].send({t:'party.join',party:i.party});assert.equal((await clients[n].next('party')).party.members.length,n+1);}
+    clients[0].send({t:'party.invite',player:profiles[4].player_id});assert.equal((await clients[0].next('err')).code,'party_full');
+    clients[0].messages=clients[0].messages.filter(m=>m.t!=='party');clients[0].send({t:'party.leave'});assert.equal((await clients[0].next('party')).party,null);
+    assert.equal(hub.social.party(profiles[1].player_id).leader,profiles[1].player_id);
+    clients[1].send({t:'city.leave'});await clients[1].next('city.left');assert.equal((await clients[0].next('city.drop')).slot,city.slot);
+  }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('friends require consent, resolve stable usernames, persist and can be removed',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-friends-'));let hub=new Hub({dir,port:0,log:false});let clients=[];
+  try{
+    await hub.start();const keys=[newClient(),newClient(),newClient()];const profiles=keys.map((k,n)=>({...k,...hub.enroll(['Alice','Bobby','Carol'][n],k.key)}));
+    assert.throws(()=>hub.enroll('alice',newClient().key),/username_taken/);
+    for(const p of profiles)clients.push(await connect(hub,p));const [a,b,c]=clients;
+    c.send({t:'friend.answer',username:'Alice',accept:true});assert.equal((await c.next('err')).code,'request_not_found');
+    a.send({t:'friend.add',username:'bObBy'});assert.equal((await b.next('friend.request')).from,'Alice');assert.deepEqual((await a.next('social')).requests_out,['Bobby']);assert.deepEqual((await b.next('social')).requests_in,['Alice']);
+    assert.equal(hub.friends.peers(profiles[0].player_id).length,0);
+    b.send({t:'friend.answer',username:'Alice',accept:true});assert.equal((await a.next('social')).friends[0].username,'Bobby');assert.equal((await b.next('social')).friends[0].username,'Alice');
+    for(const c of clients)c.ws.terminate();clients=[];await hub.close();hub=new Hub({dir,port:0,log:false});await hub.start();
+    const again=await connect(hub,profiles[0]);clients.push(again);again.send({t:'social.get'});const snapshot=await again.next('social');assert.equal(snapshot.friends[0].username,'Bobby');assert.equal(snapshot.friends[0].online,false);
+    again.send({t:'friend.remove',username:'Bobby'});assert.equal((await again.next('social')).friends.length,0);assert.equal(hub.friends.peers(profiles[1].player_id).length,0);
+  }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('native refresh rotates credentials, rejects forged proof and safely repeats a lost response',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-refresh-'));const hub=new Hub({dir,port:0,log:false});
+  try{
+    await hub.start();const key=newClient(),profile=hub.enroll('RenewTrainer',key.key),proof=refreshProof(profile.refresh_token);
+    assert.equal(proof.bytes.length,60);assert.equal(proof.bytes.subarray(0,12).toString(),'PT2-REFRESH\0');
+    const request={refresh_token:profile.refresh_token,op:proof.op,sig:sign(null,proof.bytes,privateKey(b64(key.seed,32,32))).toString('base64')};
+    const post=m=>fetch(hub.url+'/auth/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(m)});
+    assert.equal((await post({...request,sig:randomBytes(64).toString('base64')})).status,400);
+    const response=await post(request);assert.equal(response.status,200);const credentials=await response.json();assert.notEqual(credentials.refresh_token,profile.refresh_token);assert.equal(readToken(hub.identity,credentials.token).player,profile.player_id);
+    assert.deepEqual(await (await post(request)).json(),credentials);
+    assert.equal((await post({...request,op:randomUUID()})).status,400);
+    assert.equal(hub.store.db.prepare('SELECT 1 FROM refresh WHERE hash=?').get(sha(profile.refresh_token).toString('hex')),undefined);
+  }finally{await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('chat history, subscriptions, idempotent sends, channel isolation and restart recovery',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-chat-'));let hub=new Hub({dir,port:0,log:false});let clients=[];
+  try{
+    await hub.start();const keys=[newClient(),newClient()];const profiles=keys.map((k,n)=>({...k,...hub.enroll('Chatter'+n,k.key)}));
+    const a=await connect(hub,profiles[0]),b=await connect(hub,profiles[1]);clients=[a,b];
+    a.send({t:'chat.join',channel:'global'});assert.equal((await a.next('chat')).msgs.length,0);b.send({t:'chat.join',channel:'lang.en'});await b.next('chat');
+    const message={t:'chat.send',channel:'global',text:'Local integration test',op:randomUUID()};a.send(message);const first=await a.next('chat.new');assert.equal(first.msg.from,'Chatter0');
+    a.send(message);assert.equal((await a.next('chat.new')).msg.id,first.msg.id);assert.equal(hub.store.db.prepare('SELECT COUNT(*) n FROM chat_messages').get().n,1);
+    a.send({...message,text:'Changed text'});assert.equal((await a.next('err')).code,'op_conflict');
+    b.send({t:'chat.get',channel:'lang.en',before:0,limit:50});assert.equal((await b.next('chat')).msgs.length,0);assert.equal(b.messages.some(m=>m.t==='chat.new'),false);
+    b.send({t:'chat.get',channel:'guild'});assert.equal((await b.next('err')).code,'unsupported_channel');
+    a.send({t:'chat.read',channel:'global',upto:first.msg.id});assert.equal((await a.next('chat')).read_upto,first.msg.id);
+    for(const c of clients)c.ws.terminate();clients=[];await hub.close();hub=new Hub({dir,port:0,log:false});await hub.start();
+    const again=await connect(hub,profiles[0]);clients.push(again);again.send({t:'chat.get',channel:'global'});const history=await again.next('chat');assert.equal(history.msgs[0].text,message.text);assert.equal(history.read_upto,first.msg.id);
+  }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('shutdown requires the local server owner and a fresh signed challenge',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-control-'));const hub=new Hub({dir,port:0,log:false});
+  try{
+    await hub.start();const owner=newClient(),guest=newClient();hub.enroll('Owner',owner.key);hub.enroll('Guest',guest.key);
+    const challenge=await fetch(hub.url+'/private/control/challenge').then(r=>r.json());
+    const make=(key,player)=>({action:'shutdown',player,...challenge,sig:sign(null,controlBytes(b64(challenge.nonce,32,32),challenge.server_ms),privateKey(b64(key.seed,32,32))).toString('base64')});
+    const post=m=>fetch(hub.url+'/private/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(m)});
+    assert.equal((await post(make(guest,'2'))).status,400);assert.equal((await post(make(guest,'1'))).status,400);
+    const response=await post(make(owner,'1'));assert.equal(response.status,200);assert.equal((await response.json()).ok,true);await hub.close();await hub.close();
+  }finally{await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('private accounts reserve unique names, require their own key, rename safely and recover lost registration responses',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'pt-accounts-'));let hub=new Hub({dir,port:0,log:false});
+  try{
+    await hub.start();const file=join(dir,'account.json'),second=join(dir,'second.json');
+    const created=await accountClient('register',{url:hub.url,name:'ChosenName',out:file});assert.equal(created.username,'ChosenName');
+    const profile=JSON.parse(readFileSync(file));assert.equal(hub.store.trainer(profile.player_id).name,'ChosenName');
+    await assert.rejects(()=>accountClient('register',{url:hub.url,name:'chosenname',out:second}),/username_taken/);
+    const thief=newClient(),post=(path,m)=>fetch(hub.url+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(m)});
+    const request={action:'rename',key:profile.key,username:'StolenName'};const challenge=await (await post('/auth/account/challenge',request)).json();
+    const forged={...request,nonce:challenge.nonce,sig:sign(null,accountBytes('rename',b64(challenge.nonce,32,32),profile.key,'StolenName'),privateKey(b64(thief.seed,32,32))).toString('base64')};assert.equal((await post('/auth/account',forged)).status,400);assert.equal(hub.store.player(profile.player_id).name,'ChosenName');
+    const login=await accountClient('login',{profile:file});assert.equal(login.player,created.player);
+    const renamed=await accountClient('rename',{profile:file,name:'NewName'});assert.equal(renamed.player,created.player);assert.equal(renamed.username,'NewName');assert.equal(hub.store.trainer(profile.player_id).name,'NewName');
+    await accountClient('register',{url:hub.url,name:'OtherName',out:second});await assert.rejects(()=>accountClient('rename',{profile:second,name:'NEWNAME'}),/username_taken/);
+    // Simulate receiving the server commit but losing the local result file.
+    const current=JSON.parse(readFileSync(file));writeFileSync(file+'.pending',JSON.stringify({seed:current.seed,key:current.key,hub:hub.url,hub_key:current.hub_key}));unlinkSync(file);
+    const recovered=await accountClient('register',{url:hub.url,name:'NewName',out:file});assert.equal(recovered.player,created.player);
+    await hub.close();hub=new Hub({dir,port:0,log:false});await hub.start();assert.equal(hub.store.player(created.player).name,'NewName');assert.equal(hub.store.db.prepare('SELECT COUNT(*) n FROM players WHERE lower(name)=?').get('newname').n,1);
+  }finally{await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
