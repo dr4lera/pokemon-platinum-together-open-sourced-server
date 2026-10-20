@@ -11,14 +11,20 @@ import {inboxClient} from './inbox-client.mjs';
 import {adminClient} from './admin-client.mjs';
 import {loadConfig,createConfig} from './config.mjs';
 import {worldsClient} from './worlds-client.mjs';
+import {galleryProxyCommand} from './gallery-proxy.mjs';
+import {trainerArtClient} from './trainer-art-client.mjs';
 
 const args=process.argv.slice(2);const value=(name,fallback)=>{const i=args.indexOf('--'+name);return i<0?fallback:args[i+1];};
 const dir=resolve(value('data',fileURLToPath(new URL('../Data/',import.meta.url))));
-if(args[0]==='init-config'){
+if(args[0]==='gallery-proxy'){
+  try{await galleryProxyCommand({profile:value('profile'),out:value('out')});}catch(e){console.error(JSON.stringify({error:e.message??'gallery_unavailable'}));process.exitCode=1;}
+}else if(args[0]==='trainer-art'){
+  try{await trainerArtClient({profile:value('profile'),action:value('action','list'),file:value('file'),metadata:value('metadata')?JSON.parse(readFileSync(value('metadata'),'utf8')):undefined,art:value('art')?JSON.parse(readFileSync(value('art'),'utf8')):undefined,select:!args.includes('--no-select'),out:value('out')});console.log('Trainer artwork request complete');}catch(e){console.error(JSON.stringify({error:e.code??e.message??'trainer_art_failed'}));process.exitCode=1;}
+}else if(args[0]==='init-config'){
   console.log('Created '+createConfig(value('config',fileURLToPath(new URL('./server.json',import.meta.url)))));
 }else if(args[0]==='check-config'){
   loadConfig(value('config',fileURLToPath(new URL('./server.json',import.meta.url))));console.log('Server configuration is valid');
-}else if(['worlds','discord-invite','party-join'].includes(args[0])){
+}else if(['worlds','discord-invite','party-join','friend-code-create','friend-code-join'].includes(args[0])){
   try{await worldsClient({profile:value('profile'),out:value('out'),action:args[0],code:value('code')});console.log('Lobby request complete');}catch(e){console.error(JSON.stringify({error:e.code??e.message??'world_list_failed'}));process.exitCode=1;}
 }else if(args[0]==='moderate'){
   try{await adminClient({profile:value('profile'),action:value('action'),target:value('target',''),reason:value('reason',''),out:value('out')});console.log('Server management request complete');}catch(e){console.error(JSON.stringify({error:e.code??'control_failed'}));process.exitCode=1;}
@@ -53,7 +59,7 @@ if(args[0]==='refresh-local'){
   writeFileSync(destination,JSON.stringify({schema:1,hub:value('url','http://127.0.0.1:8787'),hub_key:hub.identity.pin,...client,...credentials},null,2),{flag:'wx',mode:0o600});
   console.log(`Private player ${credentials.player_id} provisioned: ${destination}`);hub.store.close();
 }else{
-  await hub.start();console.log(`Private backend: ${hub.url}\nPublic signing key: ${hub.identity.pin}\nStatus: development; dedicated game simulation and end-to-end native play remain unverified.`);
+  await hub.start();console.log(`Private backend: ${hub.url}\nPublic signing key: ${hub.identity.pin}\nStatus: native gameplay, friend battles and trading user-confirmed on matching prepared 0.1.7 clients (combined role); dedicated simulation unfinished.`);
   let closing=false;for(const signal of ['SIGINT','SIGTERM'])process.on(signal,async()=>{if(closing)return;closing=true;await hub.close();process.exitCode=0;});
 }
 }

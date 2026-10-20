@@ -1,5 +1,6 @@
 import {randomBytes,verify} from 'node:crypto';
 import {b64,publicKey,sha,fail} from './identity.mjs';
+import {trainerNameFromUsername} from './store.mjs';
 
 export const validUsername=name=>typeof name==='string'&&/^[A-Za-z][A-Za-z0-9_]{2,15}$/.test(name);
 export const accountBytes=(action,nonce,key,username='')=>Buffer.concat([Buffer.from('PT-PRIVATE-ACCOUNT\0','ascii'),nonce,sha(Buffer.from(action+'\0'+username.toLowerCase()+'\0'+key,'ascii'))]);
@@ -28,13 +29,13 @@ export class Accounts {
     let player;
     if(m.action==='register'){
       player=this.hub.store.enroll(m.username,m.key);
-      this.hub.store.putTrainer(String(player.id),{name:player.name.slice(0,10),look:0,outfit:0,tutorial_done:false,revision:0});
+      this.hub.store.putTrainer(String(player.id),{name:trainerNameFromUsername(player.name),look:0,outfit:0,tutorial_done:false,revision:0});
     }
     else{
       player=this.hub.store.db.prepare('SELECT * FROM players WHERE key=? AND disabled=0').get(m.key);if(!player)fail('account_not_found');
       if(m.action==='rename'){
         this.hub.store.rename(String(player.id),m.username);player=this.hub.store.player(String(player.id));
-        this.hub.friends.presence(String(player.id));
+        this.hub.social.profileChanged(String(player.id));
       }
     }
     return {...this.hub.credentials(String(player.id)),username:player.name,hub_key:this.hub.identity.pin};

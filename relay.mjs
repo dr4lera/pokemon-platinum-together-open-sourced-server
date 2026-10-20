@@ -12,7 +12,12 @@ export class Relay {
   cancel(player){for(const s of this.sessions.values())if(s.players.includes(player)){const ending=player===s.host;for(const c of this.peers(s))if(ending||c.player===player)c.ws.close(1008,'party changed');if(ending)this.sessions.delete(s.id);else s.players[s.players.indexOf(player)]=null;}}
   allocate(c,m){
     const party=this.hub.social.party(c.player);if(!party)fail('party_required');if(typeof m.request_id!=='string'||!/^[0-9a-f-]{36}$/i.test(m.request_id))fail('bad_request_id');
-    if(!this.hub.social.online(party.leader).length)fail('host_offline');
+    const hosts=this.hub.social.online(party.leader);
+    if(!hosts.length)fail('host_offline');
+    // An Inverna invitation is party membership, not a playable home snapshot.
+    // Allocating here can start native co-op on the city map and block its
+    // normal return action. The host must leave the city before world entry.
+    if(hosts.some(peer=>peer.city))fail('host_in_city');
     let s=[...this.sessions.values()].find(s=>s.party===party.id&&s.host===party.leader);
     if(!s){if(this.sessions.size>=128)fail('busy');let record=this.hub.store.db.prepare('SELECT world FROM relay_worlds WHERE owner=?').get(party.leader);if(!record){record={world:randomUUID()};this.hub.store.db.prepare('INSERT INTO relay_worlds VALUES(?,?)').run(party.leader,record.world);}s={id:randomUUID(),world:record.world,host:party.leader,party:party.id,players:[],epoch:1,activity:Date.now(),build:null};this.sessions.set(s.id,s);}
     if(!s.players.length)s.players=[party.leader];for(const player of party.members)if(!s.players.includes(player)){let seat=s.players.indexOf(null);if(seat<0)seat=s.players.length;if(seat>3)fail('session_full');s.players[seat]=player;}s.activity=Date.now();

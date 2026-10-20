@@ -10,5 +10,6 @@
     "trustedLoopbackProxy": false
   },
   "logging": { "enabled": true },
-  "plugins": { "enabled": true, "directory": "../Data/Plugins" }
+  "plugins": { "enabled": true, "directory": "../Data/Plugins" },
+  "invitations": { "friendCodes": false }
 }

@@ -5,7 +5,7 @@ import {isIP} from 'node:net';
 export const exampleConfig={
  schema:1,name:'Platinum Private Worlds',role:'combined',data:'../Data',
  network:{bind:'127.0.0.1',port:8788,publicUrl:null,trustedLoopbackProxy:false},
- logging:{enabled:true},plugins:{enabled:true,directory:'../Data/Plugins'}
+ logging:{enabled:true},plugins:{enabled:true,directory:'../Data/Plugins'},invitations:{friendCodes:false}
 };
 const bad=message=>{throw new Error('Server config: '+message);};
 function object(value,keys,label){
@@ -32,10 +32,11 @@ export function parseConfig(raw,base){
  }
  const logging={...exampleConfig.logging,...object(raw.logging??{},['enabled'],'logging')};
  const plugins={...exampleConfig.plugins,...object(raw.plugins??{},['enabled','directory'],'plugins')};
+ const invitations={...exampleConfig.invitations,...object(raw.invitations??{},['friendCodes'],'invitations')};
  return {name:name.trim(),role,dir:path(raw.data??exampleConfig.data,base,'data'),host:n.bind,port:n.port,publicUrl,
   trustedLoopbackProxy:boolean(n.trustedLoopbackProxy,'network.trustedLoopbackProxy'),
   log:boolean(logging.enabled,'logging.enabled'),pluginsEnabled:boolean(plugins.enabled,'plugins.enabled'),
-  pluginDirectory:path(plugins.directory,base,'plugins.directory')};
+  pluginDirectory:path(plugins.directory,base,'plugins.directory'),friendCodesEnabled:boolean(invitations.friendCodes,'invitations.friendCodes')};
 }
 export function loadConfig(file,{optional=false}={}){
  const target=resolve(file);if(optional&&!existsSync(target))return null;

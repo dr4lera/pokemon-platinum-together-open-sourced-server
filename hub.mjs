@@ -20,6 +20,8 @@ import {CustomGifts} from './custom-gifts.mjs';
 import {Moderation} from './moderation.mjs';
 import {Plugins} from './plugins.mjs';
 import {DiscordInvites} from './discord-invites.mjs';
+import {FriendCodes} from './friend-codes.mjs';
+import {TrainerArt,MAX_TRAINER_ART_REQUEST_BYTES} from './trainer-art.mjs';
 
 const LIMITS={game_frames_per_second:120,game_bytes_per_second:262144,game_burst_bytes:524288};
 const FEATURES={realms:true,city:true,adventures:false,runs:false,player_worlds:false,offline_catches:false,trading:false,public_pvp:false,social:true};
@@ -28,20 +30,23 @@ const hash=v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)?v:fail('bad_hash');
 const ticketHash=v=>sha(b64(v,32,32)).toString('hex');
 
 export class Hub {
-  constructor({dir,port=8787,host='127.0.0.1',publicUrl,log=true,name='Platinum Private Worlds',role='combined',trustedLoopbackProxy,pluginsEnabled=true,pluginDirectory}={}) {
+  constructor({dir,port=8787,host='127.0.0.1',publicUrl,log=true,name='Platinum Private Worlds',role='combined',trustedLoopbackProxy,pluginsEnabled=true,pluginDirectory,friendCodesEnabled=false}={}) {
     if(!dir)throw new Error('A data directory is required');
     if(!['combined','inverna','world'].includes(role))throw new Error('Invalid server role');
     // Ordinary 0.1.5 clients can enter relay co-op through Menu > Party >
     // Join World. Persistent world and Inverna deployments remain separate.
-    this.role=role;this.features={...FEATURES,city:role!=='world',realms:role!=='inverna',player_worlds:role==='combined'};
+    if(typeof friendCodesEnabled!=='boolean')throw new Error('friendCodesEnabled must be boolean');
+    this.role=role;this.features={...FEATURES,city:role!=='world',realms:role!=='inverna',player_worlds:role==='combined',friend_codes:friendCodesEnabled&&role!=='world'};
     mkdirSync(dir,{recursive:true});this.dir=dir;this.port=port;this.host=host;this.publicUrl=publicUrl;this.logging=log;this.name=name;this.pluginsEnabled=pluginsEnabled;this.pluginDirectory=pluginDirectory;
     this.store=new Store(join(dir,'worlds.sqlite'));this.identity=loadIdentity(dir);
+    this.trainerArt=new TrainerArt(this);
     this.connections=new Set();this.tickets=new Map();this.transfers=new Map();this.builds=new Map();
     this.trustedProxy=trustedLoopbackProxy??(this.store.db.prepare("SELECT value FROM server_settings WHERE name='trusted_loopback_proxy'").get()?.value==='1');
     this.moderation=new Moderation(this);
     this.plugins=new Plugins(this);
     this.social=new Social(this);
     this.discordInvites=new DiscordInvites(this);
+    this.friendCodes=new FriendCodes(this);
     this.friends=new Friends(this);
     this.chat=new Chat(this);
     this.control=new Control(this);
@@ -78,9 +83,18 @@ export class Hub {
     const send=(status,obj)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(obj));};
     try{
       if(!['/private/server-info','/private/control/challenge','/private/control'].includes(path)&&this.moderation.blockedIp(this.moderation.address(req)))return send(403,{error:'ip_banned'});
-      if(req.method==='GET'&&path==='/health')return send(200,{status:'development',protocol:2,realm_protocol:1,players:this.connections.size,worlds:this.store.db.prepare('SELECT COUNT(*) AS n FROM realms').get().n,dedicated_simulation:false,native_client_verified:false});
+      if(req.method==='GET'&&path==='/health')return send(200,{status:'development',protocol:2,realm_protocol:1,players:this.connections.size,worlds:this.store.db.prepare('SELECT COUNT(*) AS n FROM realms').get().n,dedicated_simulation:false,native_client_verified:this.role==='combined',native_verification:{source:'user-confirmed',game:'0.1.7',role:'combined',scope:['gameplay','friend battles','trading']}});
       if(req.method==='GET'&&path==='/v1/public/capacity')return send(200,{version:1,as_of_ms:Date.now(),status:'open',public_players_online:[...this.connections].filter(c=>c.authenticated&&c.kind==='lobby').length});
-      if(req.method==='GET'&&path==='/private/server-info')return send(200,{name:this.name,role:this.role,hub:this.url,hub_key:this.identity.pin,account_protocol:1,backend_revision:5,world_history_protocol:1,discord_invite_protocol:1,relay_protocol:1,mail_protocol:1,moderation_protocol:1,trusted_loopback_proxy:this.trustedProxy,bind:this.host,port:this.port,features:this.features});
+      if(req.method==='GET'&&path==='/private/server-info')return send(200,{name:this.name,role:this.role,hub:this.url,hub_key:this.identity.pin,account_protocol:1,backend_revision:6,friend_code_protocol:1,trainer_art_protocol:1,world_history_protocol:1,discord_invite_protocol:1,relay_protocol:1,mail_protocol:1,moderation_protocol:1,trusted_loopback_proxy:this.trustedProxy,bind:this.host,port:this.port,features:this.features});
+      if(req.method==='GET'&&path==='/private/trainer-art/challenge')return send(200,this.trainerArt.challenge());
+      if(req.method==='POST'&&path==='/private/trainer-art'){
+        const parts=[];let size=0;for await(const part of req){size+=part.length;if(size>MAX_TRAINER_ART_REQUEST_BYTES)fail('too_large');parts.push(part);}
+        return send(200,this.trainerArt.request(JSON.parse(Buffer.concat(parts).toString('utf8'))));
+      }
+      const artCollection=/^\/api\/creators\/v1\/game\/players\/([1-9][0-9]{0,18})\/trainers$/.exec(path);
+      if(req.method==='GET'&&artCollection)return send(200,this.trainerArt.collection(artCollection[1]));
+      const artPack=/^\/api\/creators\/v1\/packs\/([a-f0-9]{64})\.pttrainer$/.exec(path);
+      if(req.method==='GET'&&artPack){const pack=this.trainerArt.pack(artPack[1]);res.writeHead(200,{'Content-Type':pack.contentType,'Content-Length':pack.bytes.length,'Cache-Control':'public, max-age=31536000, immutable','X-Content-Type-Options':'nosniff'});res.end(pack.bytes);return;}
       if(req.method==='GET'&&/^\/private\/j\/[A-Za-z0-9_-]{22}$/.test(path))return send(200,this.discordInvites.resolve(path.split('/').at(-1)));
       if(req.method==='POST'&&['/auth/account/challenge','/auth/account'].includes(path)){
         let body='';for await(const part of req){body+=part;if(Buffer.byteLength(body)>4096)fail('too_large');}
@@ -164,6 +178,8 @@ export class Hub {
     if(this.role==='world'&&m.t.startsWith('city.'))fail('inverna_server_required');
     if(m.t==='private.worlds.list'){this.send(c,{t:'private.worlds',worlds:this.store.joinedWorlds(c.player)});return;}
     if(m.t==='private.discord.invite'){this.send(c,{t:'private.discord.invite',invite:this.discordInvites.create(c.player)});return;}
+    if(this.friendCodes.handle(c,m))return;
+    if(this.trainerArt.handle(c,m))return;
     if(m.t==='plugin.call'){this.plugins.call(c,m).then(data=>this.send(c,{t:'plugin.result',plugin:m.plugin,op:m.op,data})).catch(e=>this.send(c,{t:'err',code:['plugin_busy','plugin_unavailable','plugin_timeout'].includes(e.message)?e.message:'plugin_failed'}));return;}
     if(m.t==='auth.renew'){this.send(c,renewLobby(this,c,m));return;}
     if(this.relay.lobby(c,m))return;
@@ -172,7 +188,11 @@ export class Hub {
     if(this.friends.handle(c,m))return;
     if(this.social.handle(c,m))return;
     if(m.t==='trainer.get'){this.send(c,{t:'trainer',trainer:this.store.trainer(c.player),applied:false});return;}
-    if(m.t==='trainer.put'){this.send(c,this.store.putTrainer(c.player,m));return;}
+    if(m.t==='trainer.put'){
+      const before=this.store.trainer(c.player),result=this.store.putTrainer(c.player,m);this.send(c,result);
+      if(result.applied&&['name','look','outfit'].some(key=>before?.[key]!==result.trainer[key]))this.social.profileChanged(c.player);
+      return;
+    }
     if(m.t==='ping'){this.send(c,{t:'pong',ts:integer(m.ts,0,Number.MAX_SAFE_INTEGER),server_ms:Date.now()});return;}
     if(m.t==='realm.list'){const rs=this.store.list(c.player);this.send(c,{t:'realm.list',tier:null,limit:16,can_create:rs.filter(r=>String(r.owner)===c.player).length<16,realms:rs.map(r=>this.descriptor(r,c.player))});return;}
     if(m.t==='realm.create'){const r=this.store.create(c.player,m.name);this.send(c,{t:'realm',realm:this.descriptor(r,c.player)});return;}

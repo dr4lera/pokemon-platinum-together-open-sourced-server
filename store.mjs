@@ -2,6 +2,9 @@ import {DatabaseSync} from 'node:sqlite';
 import {fail, b64, sha} from './identity.mjs';
 
 export function text(value, max=24) {if(typeof value!=='string'||!value.trim()||Buffer.byteLength(value)>max||/[\x00-\x1f\x7f]/.test(value)) fail('bad_text');return value;}
+// Native trainer names differ from account usernames: underscores are valid
+// in usernames, while native display names allow spaces, dots and apostrophes.
+export const trainerNameFromUsername=value=>value.replace(/_/g,' ').slice(0,10).trimEnd();
 export function integer(value,min=0,max=0x7fffffff) {if(!Number.isSafeInteger(value)||value<min||value>max) fail('bad_number');return value;}
 export function pairs(value) {
   if(!Array.isArray(value)||value.length>2048) fail('bad_story');
@@ -39,9 +42,17 @@ export class Store {
   joinedWorlds(player){return this.db.prepare("SELECT v.kind,v.world,v.name,CAST(v.owner AS TEXT) AS owner,v.joined_at_ms,p.name AS owner_name FROM world_visits v JOIN players p ON p.id=v.owner WHERE v.player=? AND (v.kind='relay' OR EXISTS(SELECT 1 FROM members m WHERE CAST(m.realm AS TEXT)=v.world AND m.player=v.player)) ORDER BY v.joined_at_ms DESC LIMIT 100").all(player);}
   playerInfo(id){const p=this.db.prepare('SELECT * FROM players WHERE id=? AND disabled=0').get(id);if(!p)fail('bad_player');return p;}
   player(id){const p=this.playerInfo(id);if(this.db.prepare("SELECT 1 FROM server_bans WHERE kind='user' AND target=?").get(String(p.id)))fail('user_banned');return p;}
-  rename(id,name){if(typeof name!=='string'||!/^[A-Za-z][A-Za-z0-9_]{2,15}$/.test(name))fail('invalid_username');return this.tx(()=>{this.player(id);if(this.db.prepare('SELECT 1 FROM players WHERE lower(name)=lower(?) AND id!=?').get(name,id))fail('username_taken');this.db.prepare('UPDATE players SET name=? WHERE id=?').run(name,id);this.db.prepare('UPDATE trainers SET name=?,revision=revision+1 WHERE player=?').run(name.slice(0,10),id);return this.player(id);});}
+  rename(id,name){if(typeof name!=='string'||!/^[A-Za-z][A-Za-z0-9_]{2,15}$/.test(name))fail('invalid_username');return this.tx(()=>{this.player(id);if(this.db.prepare('SELECT 1 FROM players WHERE lower(name)=lower(?) AND id!=?').get(name,id))fail('username_taken');this.db.prepare('UPDATE players SET name=? WHERE id=?').run(name,id);this.db.prepare('UPDATE trainers SET name=?,revision=revision+1 WHERE player=?').run(trainerNameFromUsername(name),id);return this.player(id);});}
   trainer(player){const p=this.db.prepare('SELECT name,look,outfit,tutorial_done,revision,created_at_ms FROM trainers WHERE player=?').get(player);return p?{...p,tutorial_done:!!p.tutorial_done}:null;}
-  putTrainer(player,m){text(m.name,10);if(!/^[A-Za-z0-9 _-]+$/.test(m.name))fail('name_refused');integer(m.look,0,255);integer(m.outfit,0,65535);integer(m.revision,0);if(typeof m.tutorial_done!=='boolean')fail('bad_trainer');return this.tx(()=>{const old=this.trainer(player);if(m.revision!==(old?.revision??0))return {t:'trainer',trainer:old,applied:false};this.db.prepare('INSERT INTO trainers(player,name,look,outfit,tutorial_done,revision,created_at_ms) VALUES(?,?,?,?,?,?,?) ON CONFLICT(player) DO UPDATE SET name=excluded.name,look=excluded.look,outfit=excluded.outfit,tutorial_done=excluded.tutorial_done,revision=excluded.revision').run(player,m.name,m.look,m.outfit,m.tutorial_done?1:0,m.revision+1,old?.created_at_ms??Date.now());return {t:'trainer',trainer:this.trainer(player),applied:true};});}
+  putTrainer(player,m){integer(m.look,0,255);integer(m.outfit,0,65535);integer(m.revision,0);if(typeof m.tutorial_done!=='boolean')fail('bad_trainer');return this.tx(()=>{
+    const old=this.trainer(player);
+    // Native clients send their name when creating a trainer (revision zero),
+    // then omit it from subsequent appearance/tutorial updates.
+    const name=m.name===undefined&&m.revision>0?old?.name:m.name;
+    text(name,10);if(!/^[A-Za-z0-9](?:[A-Za-z0-9 .'-]{0,8}[A-Za-z0-9.])?$/.test(name))fail('name_refused');
+    if(m.revision!==(old?.revision??0))return {t:'trainer',trainer:old,applied:false};
+    this.db.prepare('INSERT INTO trainers(player,name,look,outfit,tutorial_done,revision,created_at_ms) VALUES(?,?,?,?,?,?,?) ON CONFLICT(player) DO UPDATE SET name=excluded.name,look=excluded.look,outfit=excluded.outfit,tutorial_done=excluded.tutorial_done,revision=excluded.revision').run(player,name,m.look,m.outfit,m.tutorial_done?1:0,m.revision+1,old?.created_at_ms??Date.now());return {t:'trainer',trainer:this.trainer(player),applied:true};
+  });}
   enroll(name,key){text(name,16);if(!/^[A-Za-z][A-Za-z0-9_]{2,15}$/.test(name))fail('invalid_username');b64(key,32,32);return this.tx(()=>{if(this.db.prepare('SELECT 1 FROM players WHERE key=?').get(key))fail('already_enrolled');if(this.db.prepare('SELECT 1 FROM players WHERE lower(name)=lower(?)').get(name))fail('username_taken');const r=this.db.prepare('INSERT INTO players(name,key) VALUES(?,?)').run(name,key);return this.player(String(r.lastInsertRowid));});}
   create(owner,name){this.player(owner);text(name);return this.tx(()=>{if(this.db.prepare('SELECT COUNT(*) AS n FROM realms WHERE owner=?').get(owner).n>=16)fail('realm_limit');const r=this.db.prepare('INSERT INTO realms(name,owner,created) VALUES(?,?,?)').run(name,owner,Date.now());const id=String(r.lastInsertRowid);this.db.prepare('INSERT INTO members(realm,player,seat) VALUES(?,?,0)').run(id,owner);return this.realm(id,owner);});}
   realm(id,player){if(typeof id!=='string'||!/^[1-9][0-9]{0,18}$/.test(id))fail('bad_realm');const r=this.db.prepare('SELECT r.*,m.seat,m.revision,m.bytes FROM realms r JOIN members m ON m.realm=r.id WHERE r.id=? AND m.player=?').get(id,player);if(!r)fail('not_a_member');return r;}

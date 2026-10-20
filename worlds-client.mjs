@@ -3,9 +3,11 @@ import {sign} from 'node:crypto';
 import {WebSocket} from './vendor/ws/wrapper.mjs';
 import {accountClient} from './account-client.mjs';
 import {b64,sha,proofBytes,privateKey,fail} from './identity.mjs';
+import {normalizeFriendCode} from './friend-codes.mjs';
 
 export async function worldsClient({profile,out,action='worlds',code}){
- if(!['worlds','discord-invite','party-join'].includes(action))fail('bad_lobby_action');
+ if(!['worlds','discord-invite','party-join','friend-code-create','friend-code-join'].includes(action))fail('bad_lobby_action');
+ if(action==='friend-code-join')code=normalizeFriendCode(code);
  if(action==='party-join'&&!/^[A-HJKMNP-Z2-9]{6}$/.test(code))fail('bad_party_code');
  await accountClient('login',{profile});
  const p=JSON.parse(readFileSync(profile,'utf8'));
@@ -26,7 +28,12 @@ export async function worldsClient({profile,out,action='worlds',code}){
      const sig=sign(null,proofBytes('PT2-LOBBY',b64(m.nonce,32,32),sha(b64(token.bytes,58,58))),privateKey(b64(p.seed,32,32))).toString('base64');
      phase='ready';ws.send(JSON.stringify({t:'auth',sig}));
     }else if(m.t==='lobby.ready'&&phase==='ready'){
-     phase='worlds';ws.send(JSON.stringify(action==='worlds'?{t:'private.worlds.list'}:action==='discord-invite'?{t:'private.discord.invite'}:{t:'party.join',code}));
+     if(action.startsWith('friend-code-')&&!m.features?.friend_codes)fail('friend_codes_disabled');
+     phase='worlds';ws.send(JSON.stringify(action==='worlds'?{t:'private.worlds.list'}:action==='discord-invite'?{t:'private.discord.invite'}:action==='friend-code-create'?{t:'private.friend-code.create'}:action==='friend-code-join'?{t:'private.friend-code.join',code}:{t:'party.join',code}));
+    }
+    else if(action.startsWith('friend-code-')&&m.t==='private.friend-code'&&phase==='worlds'){
+     const v=m.invite;if(!v||v.server!==p.hub||v.hub_key!==p.hub_key||typeof v.party!=='string'||typeof v.host!=='string'||v.host.length>16||!Number.isInteger(v.size)||v.size<1||v.size>4||v.max!==4||normalizeFriendCode(v.code)!==v.code||action==='friend-code-join'&&v.code!==code)fail('bad_friend_code_response');
+     finish(null,{invite:v});
     }
     else if(action==='discord-invite'&&m.t==='private.discord.invite'&&phase==='worlds')finish(null,{invite:m.invite});
     else if(action==='party-join'&&m.t==='party'&&m.party?.code===code&&phase==='worlds')finish(null,{party:m.party.id});

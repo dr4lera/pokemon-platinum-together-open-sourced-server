@@ -35,6 +35,35 @@ async function connect(hub,profile,ticket,build='test-015'){
 }
 async function ticket(c,realm){c.send({t:'realm.enter',realm});return c.next('realm.ticket');}
 
+test('optional friend codes use authenticated native parties and remain scoped to one server',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-friend-codes-')),hub=new Hub({dir,port:0,log:false,friendCodesEnabled:true}),clients=[];
+ try{
+  await hub.start();const profiles=['CodeHost','CodeGuest','CodeOther','CodeFourth','CodeFifth'].map(name=>{const key=newClient(),p={...key,...hub.enroll(name,key.key)};hub.store.putTrainer(p.player_id,{name,look:0,outfit:0,tutorial_done:true,revision:0});return {...p,hub:hub.url,hub_key:hub.identity.pin};});
+  for(const p of profiles)clients.push(await connect(hub,p));
+  assert.equal(clients[0].ready.features.friend_codes,true);
+  clients[0].send({t:'private.friend-code.create'});const first=(await clients[0].next('private.friend-code')).invite;
+  assert.match(first.code,/^[ABCDEFGHJKMNPQRSTUVWXYZ]{6}$/);assert.equal(first.server,hub.url);assert.equal(first.hub_key,hub.identity.pin);
+  clients[0].send({t:'private.friend-code.create'});assert.equal((await clients[0].next('private.friend-code')).invite.code,first.code);
+  const file=join(dir,'guest.json');writeFileSync(file,JSON.stringify(profiles[1]));
+  const joined=await worldsClient({profile:file,action:'friend-code-join',code:'  '+first.code.toLowerCase()+'  '});assert.equal(joined.invite.party,first.party);
+  clients[1].send({t:'private.friend-code.create'});assert.equal((await clients[1].next('err')).code,'already_in_party');
+  clients[2].send({t:'private.friend-code.join',code:'AAAAA0'});assert.equal((await clients[2].next('err')).code,'bad_party_code');
+  for(let i=2;i<4;i++){clients[i].send({t:'private.friend-code.join',code:first.code});assert.equal((await clients[i].next('private.friend-code')).invite.size,i+1);}
+  clients[4].send({t:'private.friend-code.join',code:first.code});assert.equal((await clients[4].next('err')).code,'party_full');
+  assert.equal(hub.relay.sessions.size,0,'joining does not create a world or consume a relay seat');
+  const alien=new Hub({dir:join(dir,'other'),port:0,log:false,friendCodesEnabled:true});try{await alien.start();assert.equal([...alien.social.parties.values()].some(p=>p.code===first.code),false);}finally{await alien.close();}
+  for(const p of profiles)hub.social.leave(p.player_id);
+  clients[1].send({t:'private.friend-code.join',code:first.code});assert.equal((await clients[1].next('err')).code,'party_not_found');
+ }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('friend codes default off without disabling existing native parties',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-codes-off-')),hub=new Hub({dir,port:0,log:false});let c;
+ try{await hub.start();const key=newClient(),p={...key,...hub.enroll('CodeDisabled',key.key)};hub.store.putTrainer(p.player_id,{name:'CodeOff',look:0,outfit:0,tutorial_done:true,revision:0});c=await connect(hub,p);
+  assert.equal(c.ready.features.friend_codes,false);c.send({t:'private.friend-code.create'});assert.equal((await c.next('err')).code,'friend_codes_disabled');c.send({t:'party.create'});assert.ok((await c.next('party')).party.code);
+ }finally{c?.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
 test('Discord invites expire, respect party ownership and require the recipient account to join',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'pt-discord-')),hub=new Hub({dir,port:0,log:false}),clients=[];
  try{
@@ -109,6 +138,17 @@ for(const build of ['test-015','b113ab54d7b0e9a690c51e87'])test(`native relay ${
   }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
 });
 
+test('invites in Inverna cannot allocate the city as a home world; normal return unlocks the visit',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-city-return-')),hub=new Hub({dir,port:0,log:false}),clients=[];
+ try{await hub.start();const profiles=['CityHost','CityGuest'].map(name=>{const key=newClient(),p={...key,...hub.enroll(name,key.key)};hub.store.putTrainer(p.player_id,{name,look:0,outfit:0,tutorial_done:true,revision:0});return p;});
+  for(const p of profiles)clients.push(await connect(hub,p));const [host,guest]=clients;
+  host.send({t:'city.enter',district:'plaza'});await host.next('city.joined');host.send({t:'party.create'});const party=(await host.next('party')).party;
+  guest.send({t:'party.join',code:party.code});await guest.next('party');guest.send({t:'party.world.join',request_id:randomUUID()});assert.equal((await guest.next('err')).code,'host_in_city');assert.equal(hub.relay.sessions.size,0);assert.equal(hub.relay.tickets.size,0);
+  host.send({t:'city.leave'});await host.next('city.left');assert.equal(hub.social.party(profiles[1].player_id).id,party.id,'return retains the invited party');
+  guest.send({t:'party.world.join',request_id:randomUUID()});const a=await host.next('party.world'),b=await guest.next('party.world');assert.equal(a.session,b.session);assert.equal(a.seat,0);assert.equal(b.seat,1);
+ }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
 test('owner-key mail publication, recipient isolation, idempotency and durable claim recovery',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'pt-mail-'));let hub=new Hub({dir,port:0,log:false});const clients=[];
   try{
@@ -173,8 +213,10 @@ test('native-shaped city presence, targeted invites, consent, capacity and party
     for(let n=0;n<5;n++){const c=await connect(hub,profiles[n]);clients.push(c);c.send({t:'trainer.put',name:'Trainer'+n,look:0,outfit:0,tutorial_done:true,revision:0});assert.equal((await c.next('trainer')).applied,true);}
     clients[0].send({t:'city.enter',district:'plaza'});assert.equal((await clients[0].next('city.joined')).players.length,0);
     clients[1].send({t:'city.enter',district:'plaza'});const city=await clients[1].next('city.joined');assert.equal(city.players[0].player,profiles[0].player_id);assert.equal((await clients[0].next('city.add')).player,profiles[1].player_id);
-    // A forged slot must be replaced with the authenticated sender's slot.
-    clients[1].ws.send(Buffer.from([2,63,3,10,20,30]));assert.deepEqual((await clients[0].next('binary')).data,Buffer.from([2,1,city.slot,3,10,20,30]));
+    // Captured native 0.1.7 frame: spatial cells 7,32 and an eight-byte position.
+    // Neither cell byte may become an authenticated player identity.
+    clients[1].ws.send(Buffer.from('020720e00a903004010000','hex'));assert.deepEqual((await clients[0].next('binary')).data,Buffer.from([2,1,city.slot,8,0xe0,0x0a,0x90,0x30,4,1,0,0]));
+    clients[1].ws.send(Buffer.from([2,63,255,1,2,3,4,5,6,7,8]));assert.deepEqual((await clients[0].next('binary')).data,Buffer.from([2,1,city.slot,8,1,2,3,4,5,6,7,8]));
     clients[1].ws.send(Buffer.from([2,0,32,10]));assert.equal((await clients[1].next('err')).code,'bad_city_frame');
     clients[0].send({t:'party.invite',player:profiles[1].player_id});const invite=await clients[1].next('party.invited');await clients[0].next('party.invite.sent');
     clients[2].send({t:'party.join',party:invite.party});assert.equal((await clients[2].next('err')).code,'invite_expired');
@@ -186,6 +228,32 @@ test('native-shaped city presence, targeted invites, consent, capacity and party
     assert.equal(hub.social.party(profiles[1].player_id).leader,profiles[1].player_id);
     clients[1].send({t:'city.leave'});await clients[1].next('city.left');assert.equal((await clients[0].next('city.drop')).slot,city.slot);
   }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('native trainer appearance updates omit name and preserve creation identity with revision conflicts',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-native-trainer-')),hub=new Hub({dir,port:0,log:false});let c;
+ try{await hub.start();const key=newClient(),p={...key,...hub.enroll('NativeLook',key.key)};c=await connect(hub,p);
+  c.send({t:'trainer.put',look:8,outfit:0,tutorial_done:true,revision:0});assert.equal((await c.next('err')).code,'bad_text');
+  c.send({t:'trainer.put',name:'LabHost',look:0,outfit:0,tutorial_done:false,revision:0});const initial=(await c.next('trainer')).trainer;
+  c.send({t:'trainer.put',look:8,outfit:0,tutorial_done:true,revision:1});const updated=await c.next('trainer');
+  assert.equal(updated.applied,true);assert.equal(updated.trainer.name,'LabHost');assert.equal(updated.trainer.revision,2);assert.equal(updated.trainer.created_at_ms,initial.created_at_ms);assert.equal(updated.trainer.look,8);
+  c.send({t:'trainer.put',look:9,outfit:2,tutorial_done:false,revision:1});const stale=await c.next('trainer');assert.equal(stale.applied,false);assert.deepEqual(stale.trainer,updated.trainer);
+  c.send({t:'trainer.put',name:null,look:9,outfit:2,tutorial_done:true,revision:2});assert.equal((await c.next('err')).code,'bad_text');assert.deepEqual(hub.store.trainer(p.player_id),updated.trainer);
+ }finally{c?.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('chosen trainer appearance and native-valid names update peers already in Inverna',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'pt-live-look-')),hub=new Hub({dir,port:0,log:false}),clients=[];
+ try{await hub.start();const file=join(dir,'account.json');await accountClient('register',{url:hub.url,name:'New_Name',out:file});const owner=JSON.parse(readFileSync(file));
+  assert.equal(hub.store.trainer(owner.player_id).name,'New Name');
+  const key=newClient(),guest={...key,...hub.enroll('LookPeer',key.key)};hub.store.putTrainer(guest.player_id,{name:'LookPeer',look:0,outfit:0,tutorial_done:true,revision:0});
+  const a=await connect(hub,owner),b=await connect(hub,guest);clients.push(a,b);
+  for(const c of clients){c.send({t:'city.enter',district:'plaza'});await c.next('city.joined');}await a.next('city.add');
+  a.send({t:'trainer.put',name:"O'Neil",look:7,outfit:123,tutorial_done:true,revision:1});const update=await a.next('trainer'),peer=await b.next('city.add');
+  assert.equal(update.applied,true);assert.equal(peer.player,owner.player_id);assert.equal(peer.name,"O'Neil");assert.equal(peer.look,7);assert.equal(peer.outfit,123);assert.equal(peer.slot,0);
+  a.ws.send(Buffer.from('020720e00ab03004010000','hex'));assert.equal((await b.next('binary')).data[2],0,'appearance updates retain the same authenticated position slot');
+  a.send({t:'trainer.put',name:'Invalid_',look:7,outfit:123,tutorial_done:true,revision:2});assert.equal((await a.next('err')).code,'name_refused');assert.equal(hub.store.trainer(owner.player_id).name,"O'Neil");
+ }finally{for(const c of clients)c.ws.terminate();await hub.close();rmSync(dir,{recursive:true,force:true});}
 });
 
 test('friends require consent, resolve stable usernames, persist and can be removed',async()=>{

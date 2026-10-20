@@ -4,23 +4,31 @@ import {text} from './store.mjs';
 
 // The native six-character parser rejects 0, O, 1, I and L.
 const PARTY_CODE_ALPHABET='ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const FRIEND_CODE_ALPHABET='ABCDEFGHJKMNPQRSTUVWXYZ';
 
 // These response shapes are accepted by the actual 0.1.5 native lobby parser.
 export class Social {
   constructor(hub){this.hub=hub;this.parties=new Map();this.membership=new Map();this.invites=new Map();}
   online(player){return [...this.hub.connections].filter(c=>c.kind==='lobby'&&c.authenticated&&c.player===player&&c.ws.readyState===1);}
   send(player,m){for(const c of this.online(player))this.hub.send(c,m);}
-  profile(player){const t=this.hub.store.trainer(player);if(!t)fail('trainer_required');return {player,name:t.name,look:t.look,outfit:t.outfit};}
+  profile(player){const t=this.hub.store.trainer(player);if(!t)fail('trainer_required');return {player,name:t.name,look:t.look,outfit:t.outfit,art:this.hub.trainerArt?.profile(player)??null};}
   party(player){return this.parties.get(this.membership.get(player));}
   snapshot(p){return {id:p.id,code:p.code,leader:p.leader,listed:p.listed,busy:false,profile_id:null,members:p.members.map(player=>({...this.profile(player),online:this.online(player).length>0}))};}
   update(p){for(const player of p.members)this.send(player,{t:'party',party:this.snapshot(p)});}
-  create(player){this.profile(player);const current=this.party(player);if(current){if(current.leader!==player)fail('already_in_party');return current;}if(this.parties.size>=256)fail('busy');let code;do{code=Array.from({length:6},()=> PARTY_CODE_ALPHABET[randomInt(PARTY_CODE_ALPHABET.length)]).join('');}while([...this.parties.values()].some(p=>p.code===code));const p={id:randomUUID(),code,leader:player,members:[player],listed:false};this.parties.set(p.id,p);this.membership.set(player,p.id);return p;}
+  create(player,lettersOnly=false){this.profile(player);const current=this.party(player);if(current){if(current.leader!==player)fail('already_in_party');return current;}if(this.parties.size>=256)fail('busy');const alphabet=lettersOnly?FRIEND_CODE_ALPHABET:PARTY_CODE_ALPHABET;let code;do{code=Array.from({length:6},()=>alphabet[randomInt(alphabet.length)]).join('');}while([...this.parties.values()].some(p=>p.code===code));const p={id:randomUUID(),code,leader:player,members:[player],listed:false};this.parties.set(p.id,p);this.membership.set(player,p.id);return p;}
   leave(player){const p=this.party(player);if(!p){this.send(player,{t:'party',party:null});return;}this.hub.relay.cancel(player);p.members=p.members.filter(x=>x!==player);this.membership.delete(player);this.send(player,{t:'party',party:null});for(const[k,v]of this.invites)if(v.party===p.id&&(v.from===player||v.to===player))this.invites.delete(k);if(!p.members.length){this.parties.delete(p.id);return;}if(p.leader===player)p.leader=p.members[0];this.update(p);}
   sweep(){for(const[k,v]of this.invites)if(v.expires<Date.now())this.invites.delete(k);}
   connected(c){const p=this.party(c.player);if(p)this.update(p);this.hub.friends.presence(c.player);}
   disconnected(c){this.cityLeave(c,false);const p=this.party(c.player);if(p)this.update(p);this.hub.friends.presence(c.player);}
   cityPlayers(district){return [...this.hub.connections].filter(c=>c.kind==='lobby'&&c.authenticated&&c.city===district&&c.ws.readyState===1);}
   cityPlayer(c){return {...this.profile(c.player),slot:c.citySlot,status:c.presence??'active'};}
+  profileChanged(player){
+    // A same-player city.add refresh keeps the native peer's valid position
+    // while replacing its name/appearance. Do not drop/recreate the avatar.
+    for(const source of this.online(player).filter(c=>c.city))for(const peer of this.cityPlayers(source.city))if(peer.player!==player)this.hub.send(peer,{t:'city.add',...this.cityPlayer(source)});
+    const party=this.party(player);if(party)this.update(party);
+    this.hub.friends.presence(player);
+  }
   cityLeave(c,reply=true){if(c.city){const district=c.city,slot=c.citySlot;delete c.city;delete c.citySlot;for(const peer of this.cityPlayers(district))this.hub.send(peer,{t:'city.drop',slot});}if(reply)this.hub.send(c,{t:'city.left',reason:'left'});}
   handle(c,m){
     if(m.t==='city.enter'){

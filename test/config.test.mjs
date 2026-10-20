@@ -11,7 +11,9 @@ test('server config resolves paths against its own folder and refuses accidental
  raw.name='My Inverna';raw.network.bind='0.0.0.0';raw.network.publicUrl='https://example.test/';raw.plugins.enabled=false;
  const config=parseConfig(raw,base);
  assert.equal(config.dir,resolve(base,'../Data'));assert.equal(config.pluginDirectory,resolve(base,'../Data/Plugins'));
- assert.equal(config.publicUrl,'https://example.test');assert.equal(config.pluginsEnabled,false);
+ assert.equal(config.publicUrl,'https://example.test');assert.equal(config.pluginsEnabled,false);assert.equal(config.friendCodesEnabled,false);
+ raw.invitations.friendCodes=true;assert.equal(parseConfig(raw,base).friendCodesEnabled,true);
+ const invalidInvites=structuredClone(raw);invalidInvites.invitations.friendCodes='true';assert.throws(()=>parseConfig(invalidInvites,base),/Server config:/);
  for(const change of [r=>r.network.port=0,r=>r.network.port='8788',r=>r.network.bind='example.com',r=>r.network.publicUrl='https://user:password@example.test',r=>r.network.publicUrl='https://example.test/path',r=>r.network.trustedLoopbackProxy='false',r=>r.plugins.enabled=1,r=>r.network.potr=42,r=>r.story={unimplemented:true}]){
   const invalid=structuredClone(raw);change(invalid);assert.throws(()=>parseConfig(invalid,base),/Server config:/);
  }

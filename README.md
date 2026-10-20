@@ -9,9 +9,15 @@ host from a stock official client is unsupported in this preview; a user reporte
 **World not found**. Private accounts, friends and relay use the selected private
 backend. See [connection compatibility](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher/blob/main/PrivateServer/docs/players.md#connection-compatibility).
 
+Native gameplay, friend battles and trading work with matching project-prepared
+0.1.7 clients on the combined private backend, confirmed by the user on
+2026-10-20. Dev12 also fixes Inverna movement packets, trainer names/appearance
+updates and world allocation while the host is still in the city. Optional
+community friend codes are available. See [verification status](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher/blob/main/PrivateServer/docs/status.md).
+
 ## Download
 
-**[Download the shared server / relay source â€” dev11 preview](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/download/v0.1.0-dev.11/PokemonPlatinumTogetherOpenSourced-Server-dev11.zip)**
+**[Download the shared server / relay source — dev11 preview](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-server/releases/download/v0.1.0-dev.11/PokemonPlatinumTogetherOpenSourced-Server-dev11.zip)**
 
 Extract the ZIP, install Node.js 24.12 or newer, and follow [Setup and tests](#setup-and-tests)
 and the [complete hosting guide](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-launcher/blob/main/PrivateServer/docs/server-hosting.md).
@@ -93,8 +99,8 @@ gameplay has loaded successfully; that remains a separate release check.
 
 The combined role advertises `player_worlds` for the tested manual relay path.
 The Inverna and persistent-world roles keep that capability disabled.
-The host uses **Host my world â†’ Use Relay**. The guest first loads a local world,
-joins the host's code through Friends, then selects **Menu â†’ Party â†’ Join World**.
+The host uses **Host my world → Use Relay**. The guest first loads a local world,
+joins the host's code through Friends, then selects **Menu → Party → Join World**.
 Two unmodified local clients completed this sequence and repeated it after backend
 restart. Party membership alone does not create the native pending world request;
 never invent an unsolicited guest allocation to skip that check.
@@ -110,3 +116,11 @@ release ID. They check world/session/seat/epoch/roster fields, native ready limi
 wrong-build refusal without consuming a valid ticket, replay rejection and binary
 forwarding. These are protocol tests, not an ordinary two-player 0.1.7 gameplay
 pass. See the launcher status page for remaining native acceptance checks.
+
+
+## Independent-client migration
+
+Dev12 source updates are staged; the download above remains the published dev11
+preview. New releases are paused while the [source gameplay client](https://github.com/dr4lera/pokemon-platinum-together-open-sourced-client)
+is developed. Confirmed reference-client gameplay does not establish 1:1 parity
+or private-server integration in that new client.

@@ -20,6 +20,7 @@ An explicit missing config is an error. Without a config, legacy CLI startup wor
 | `logging.enabled` | Write local event metadata to `events.jsonl`. |
 | `plugins.enabled` | Global plugin switch. False prevents all plugin imports, including reload. |
 | `plugins.directory` | Folder containing per-plugin directories and manifests. |
+| `invitations.friendCodes` | Optional launcher friend-code flow, default `false`. Uses authenticated native parties on combined/Inverna servers. |
 
 Relative paths resolve against the config file, independent of the current working
 directory. Plugin directory and data directory are separate explicit paths. Unknown
